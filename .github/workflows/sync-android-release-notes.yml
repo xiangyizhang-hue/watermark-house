@@ -1,0 +1,37 @@
+name: Sync Android release notes
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/android/DELIVERY-*.md'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Update existing Android releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            [[ -f "$file" ]] || continue
+            version="${file#docs/android/DELIVERY-}"
+            version="${version%.md}"
+            tag="android-v${version}"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release edit "$tag" --notes-file "$file" --repo "$GITHUB_REPOSITORY"
+            fi
+          done < <(git diff --name-only "$BEFORE" "$AFTER" -- 'docs/android/DELIVERY-*.md')
