@@ -1,0 +1,77 @@
+// 应用偏好设置：localStorage 持久化，供「首选项」弹窗读写、各功能模块读取。
+// 与 GPU 偏好（platform/gpu.ts）同层，但统一收敛在首选项 UI 中管理。
+const KEYS = {
+  exportFormat: 'framelab-pref-export-format',
+  exportQuality: 'framelab-pref-export-quality',
+  historyLimit: 'framelab-pref-history-limit',
+  startupTemplate: 'framelab-pref-startup-template',
+  autoUpdate: 'framelab-pref-auto-update',
+} as const
+
+const DEFAULT_HISTORY_LIMIT = 100
+
+function read(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) ?? fallback
+  } catch {
+    return fallback
+  }
+}
+function write(key: string, v: string): void {
+  try {
+    localStorage.setItem(key, v)
+  } catch {
+    /* localStorage 不可用时静默忽略 */
+  }
+}
+
+// ===== 导出：默认格式与 JPG 画质 =====
+// 默认 JPG 高画质（0.95）：仅当用户显式选择过 PNG（已写入 'png'）时才沿用 PNG
+export type ExportFormatPref = 'png' | 'jpg'
+export function getExportFormatPref(): ExportFormatPref {
+  return read(KEYS.exportFormat, 'jpg') === 'png' ? 'png' : 'jpg'
+}
+export function setExportFormatPref(v: ExportFormatPref): void {
+  write(KEYS.exportFormat, v)
+}
+
+export function getExportQualityPref(): number {
+  const n = Number(read(KEYS.exportQuality, '0.95'))
+  return Number.isFinite(n) ? Math.min(1, Math.max(0.5, n)) : 0.95
+}
+export function setExportQualityPref(v: number): void {
+  write(KEYS.exportQuality, String(v))
+}
+
+// ===== 编辑：历史记录上限 =====
+export const HISTORY_LIMIT_OPTIONS = [20, 50, 100, 200] as const
+// 审查报告 S18：记录编辑历史的热路径会每次提交读一次本偏好（同步 localStorage，
+// 且与存储锁竞争）——首次读取后缓存，写入时同步更新
+let historyLimitCache: number | null = null
+export function getHistoryLimitPref(): number {
+  if (historyLimitCache === null) {
+    const n = Number(read(KEYS.historyLimit, String(DEFAULT_HISTORY_LIMIT)))
+    historyLimitCache = (HISTORY_LIMIT_OPTIONS as readonly number[]).includes(n) ? n : DEFAULT_HISTORY_LIMIT
+  }
+  return historyLimitCache
+}
+export function setHistoryLimitPref(v: number): void {
+  historyLimitCache = v
+  write(KEYS.historyLimit, String(v))
+}
+
+// ===== 编辑：启动默认模板（内置模板 id；空串 = 不应用） =====
+export function getStartupTemplatePref(): string {
+  return read(KEYS.startupTemplate, '')
+}
+export function setStartupTemplatePref(v: string): void {
+  write(KEYS.startupTemplate, v)
+}
+
+// ===== 更新：启动时自动检查新版本（默认开；'0' 为显式关闭） =====
+export function getAutoUpdatePref(): boolean {
+  return read(KEYS.autoUpdate, '1') !== '0'
+}
+export function setAutoUpdatePref(v: boolean): void {
+  write(KEYS.autoUpdate, v ? '1' : '0')
+}

@@ -1,0 +1,100 @@
+// 桌面端专属启动逻辑：原生菜单事件分发（Rust 端 emit → 此处分发到各 composable）。
+// 仅在 isTauri 为 true 时由 main.ts 动态加载，网页端不会执行；
+// Tauri API 一律惰性动态加载，网页端构建不依赖 @tauri-apps/api 包。
+import { useAppState } from '../composables/useAppState'
+import { useHistory } from '../composables/useHistory'
+import { useLibrary } from '../composables/useLibrary'
+import { applyGpuPreferenceOnStartup } from './gpu'
+import {
+  pickImageFiles,
+  addLocalEntries,
+  restoreLibrary,
+} from './fs'
+import { ensureCatalogLoaded, flushPersist } from './catalog'
+
+export async function setupDesktopShell(): Promise<void> {
+  const { listen } = await import('@tauri-apps/api/event')
+  // 先从 AppData JSON 载入图库目录（含旧 localStorage 数据一次性迁移），
+  // 保证后续 restoreLibrary / restoreActive 读到权威目录（文件不怕更新重启丢数据）
+  await ensureCatalogLoaded()
+  const app = useAppState()
+  const history = useHistory()
+  const library = useLibrary()
+  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  const win = getCurrentWindow()
+  let closing = false
+  await win.onCloseRequested(async event => {
+    event.preventDefault()
+    if (closing) return
+    closing = true
+    try {
+      await history.saveAllPending()
+      await flushPersist()
+      await win.destroy()
+    } catch (error) {
+      closing = false
+      window.alert(`尚未成功保存，已保留窗口，请重试关闭：${String(error)}`)
+    }
+  })
+
+  await listen<string>('framelab://menu', (e) => {
+    const id = e.payload
+    const focused = document.activeElement as HTMLElement | null
+    const typing = focused?.matches('input,textarea,select,[contenteditable="true"]')
+    if (typing && ['undo','redo'].includes(id)) { document.execCommand(id); return }
+    if (['undo','redo','prev_photo','next_photo'].includes(id) && (typing || document.querySelector('dialog[open]'))) return
+    switch (id) {
+      case 'quit_saved':
+        void win.close()
+        break
+      case 'module_library':
+        app.setModule('library')
+        break
+      case 'module_develop':
+        app.setModule('develop')
+        break
+      case 'module_export':
+        app.setModule('export')
+        break
+      case 'goto_export':
+        app.setModule('export')
+        break
+      case 'undo':
+        void history.undo()
+        break
+      case 'redo':
+        void history.redo()
+        break
+      case 'toggle_filmstrip':
+        app.toggleFilmstrip()
+        break
+      case 'import_images':
+        void (async () => {
+          const list = await pickImageFiles()
+          if (list.length) {
+            await addLocalEntries(list)
+            app.setModule('library')
+          }
+        })()
+        break
+      case 'prev_photo':
+        library.prev()
+        break
+      case 'next_photo':
+        library.next()
+        break
+      // show_help（使用指南）由 TopBar 的菜单监听直接处理（组件内状态）
+      default:
+        break
+    }
+  })
+
+  // 按用户设置重申 Windows GPU 首选项（独显加速，幂等）
+  void applyGpuPreferenceOnStartup()
+
+  // 按图库目录恢复上次会话的图库（LrC 目录语义：只加载目录记录的路径，
+  // 不重扫文件夹，从图库移除过的照片不会回来）。
+  // 非阻塞：每张图需读盘解析 EXIF + 写 IndexedDB，大图库时避免阻塞首屏渲染，
+  // 图库条目会随恢复进度渐进出现。
+  void restoreLibrary()
+}

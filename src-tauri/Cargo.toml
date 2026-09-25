@@ -1,0 +1,47 @@
+[package]
+name = "framelab"
+version = "0.3.3"
+description = "水印小屋 · 照片水印与排版工具"
+authors = ["fengnan"]
+edition = "2021"
+
+# Tauri 库 crate：桌面端与移动端共用入口
+[lib]
+name = "framelab_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Production Android builds must use Tauri's embedded custom protocol.  The
+# generated Gradle project can compile the Rust library directly. build.rs
+# rejects Android release builds that omit this feature.
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# 预览图 DCT 缩放解码（Rust 侧直接产出缩放后 RGBA，渲染进程不物化全尺寸位图）
+jpeg-decoder = "0.3"
+
+# Android 不需要桌面对话框、单实例和 updater 插件；这些依赖放到桌面目标，
+# 避免移动构建拉入 Windows 专属能力与原桌面更新链路。
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+# 绿色版自更新：下载裸 exe（stream 分块）+ minisign 验签（复用 updater 公钥链）
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+minisign-verify = "0.2"
+futures-util = "0.3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

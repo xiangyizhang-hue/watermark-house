@@ -1,0 +1,159 @@
+<script setup lang="ts">
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useFrameConfig } from '../../composables/useFrameConfig'
+import { drawRotatedCropped, sourceSize } from '../../core/photoEdit'
+import type { PhotoCrop, PhotoRotation } from '../../core/types'
+
+const props = defineProps<{
+  src: string
+  /** 已解码的预览源图（App 传入的 Rust 缩放 canvas / 降采样 ImageBitmap / 兜底 Image），避免大图重复解码 */
+  image?: ImageBitmap | HTMLImageElement | HTMLCanvasElement | null
+  rotation: PhotoRotation
+  crop: PhotoCrop
+}>()
+const emit = defineEmits<{ (e: 'ready', info: { w: number; h: number }): void }>()
+
+const { state } = useFrameConfig()
+const canvas = ref<HTMLCanvasElement | null>(null)
+const fallbackImg = new Image()
+fallbackImg.crossOrigin = 'anonymous'
+
+/** 当前源图：优先复用外部传入的已解码图源，否则用内部加载的 fallback */
+function currentImg(): ImageBitmap | HTMLImageElement | HTMLCanvasElement {
+  return props.image ?? fallbackImg
+}
+
+let naturalW = 0
+let naturalH = 0
+
+// ===== 大图预览降采样 =====
+// App 已在解码阶段把预览源降到长边 ≤2560（ImageBitmap），此处直接复用；
+// 仅当兜底路径传入超大 HTMLImageElement 时才二次降采样（等比，几何/裁剪数学完全等价）。
+// 仅预览路径使用；导出 exporter 仍以原始全分辨率图排版，成品质量不受影响。
+const PREVIEW_LONG_MAX = 2560
+let drawSrc: ImageBitmap | HTMLImageElement | HTMLCanvasElement | null = null
+let drawW = 0
+let drawH = 0
+
+function refreshDrawSource() {
+  const im = currentImg()
+  const { w: iw, h: ih } = sourceSize(im)
+  naturalW = iw
+  naturalH = ih
+  const long = Math.max(iw, ih)
+  if (!iw || !ih || long <= PREVIEW_LONG_MAX) {
+    drawSrc = im
+    drawW = iw
+    drawH = ih
+    return
+  }
+  const f = PREVIEW_LONG_MAX / long
+  const w = Math.max(1, Math.round(iw * f))
+  const h = Math.max(1, Math.round(ih * f))
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const cx = c.getContext('2d')
+  if (!cx) {
+    drawSrc = im
+    drawW = iw
+    drawH = ih
+    return
+  }
+  cx.imageSmoothingEnabled = true
+  cx.imageSmoothingQuality = 'high'
+  cx.drawImage(im, 0, 0, w, h)
+  drawSrc = c
+  drawW = w
+  drawH = h
+}
+
+function maybeEmitReady() {
+  if (naturalW && naturalH) emit('ready', { w: naturalW, h: naturalH })
+}
+
+function render() {
+  if (!naturalW || !naturalH || !canvas.value) return
+  const c = canvas.value
+  // 画布像素 = 显示框尺寸（CSS 已按真实比例铺满，避免被裁切/拉伸）
+  const rect = c.getBoundingClientRect()
+  let dpr = Math.min(window.devicePixelRatio || 1, 2)
+  // 审查报告 R14：画布单边上限 16384（Chromium 超限静默失败 → 照片区域空白）。
+  // zoom 8× + 大屏 + dpr2 可达 19200；超限时按比例降 dpr（宁可略糊，不可空白）。
+  const MAX_DIM = 16384
+  const need = Math.max(rect.width, rect.height) * dpr
+  if (need > MAX_DIM) dpr = Math.max(0.5, dpr * (MAX_DIM / need))
+  const w = Math.max(1, Math.round(rect.width * dpr))
+  const h = Math.max(1, Math.round(rect.height * dpr))
+  if (c.width !== w) c.width = w
+  if (c.height !== h) c.height = h
+  const ctx = c.getContext('2d')
+  if (!ctx) return
+  ctx.clearRect(0, 0, w, h)
+  if (drawSrc) {
+    drawRotatedCropped(ctx, drawSrc, drawW, drawH, props.rotation, props.crop, w, h)
+  }
+}
+
+// 监听 canvas 自身尺寸变化：选择框比例/尺寸变化（含首次从占位正方形变为真实比例）时自动重绘
+let ro: ResizeObserver | null = null
+
+function load() {
+  if (!props.src) return
+  const im = currentImg()
+  // 复用外部已解码图：直接读自然尺寸（无需等待 onload），避免二次解码大图
+  if (props.image) {
+    refreshDrawSource()
+    maybeEmitReady()
+    render()
+    return
+  }
+  const el = im as HTMLImageElement // 兜底路径的源必为内部加载的 Image
+  el.onload = () => {
+    refreshDrawSource()
+    maybeEmitReady()
+    render()
+  }
+  el.src = props.src
+}
+
+onMounted(() => {
+  load()
+  render()
+  window.addEventListener('resize', render)
+  if (canvas.value && 'ResizeObserver' in window) {
+    ro = new ResizeObserver(() => render())
+    ro.observe(canvas.value)
+  }
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', render)
+  ro?.disconnect()
+  ro = null
+})
+
+watch(() => props.src, load)
+// photoX/photoY 仅由外层容器 CSS 定位（SelectableBox），不影响画布像素内容，
+// 不在此监听 —— 否则拖动照片每次 pointermove 都触发全画布重绘。
+// scale 变化会引起容器尺寸变化，由 ResizeObserver 兜底重绘，此处保留以兜住
+// 容器尺寸未变但内容比例需要刷新的边界（如 frameRatio 切换）。
+watch(
+  () => [props.rotation, props.crop, state.scale],
+  () => render(),
+)
+</script>
+
+<template>
+  <canvas ref="canvas" class="main-photo" :style="{ pointerEvents: 'none' }"></canvas>
+</template>
+
+<style scoped>
+.main-photo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+  -webkit-user-drag: none;
+  border-radius: var(--img-radius);
+}
+</style>

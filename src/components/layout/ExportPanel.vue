@@ -1,0 +1,1429 @@
+<script setup lang="ts">
+// 导出模块：格式/画质/尺寸配置、单张/批量导出、进度条。
+// （原「批量同步 → 保存当前配置为模板」入口已移至编辑页左栏「我的模板」面板。）
+// 导出成功后弹出预览（图片 + 保存按钮），确保用户「看得到」导出结果。
+// 桌面端（Tauri）：保存走系统对话框 + Rust 写盘；批量导出先选目录再逐张写入。
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useLibrary, type LibraryItem } from '../../composables/useLibrary'
+import { useFrameConfig } from '../../composables/useFrameConfig'
+import { useAppState } from '../../composables/useAppState'
+import { useHistory } from '../../composables/useHistory'
+import type { FrameConfig } from '../../core/types'
+import { buildExifText, formatDate } from '../../composables/useExif'
+import { getExportFormatPref, getExportQualityPref } from '../../composables/usePrefs'
+import {
+  exportFrame,
+  downloadBlob,
+  makeExportFilename,
+  estimateExportSize,
+  type ExportFormat,
+  type ExportOptions,
+} from '../../core/exporter'
+import { makeRuleApplier } from '../../core/textRules'
+import type { ImgSource } from '../../core/bgRenderer'
+import { isDesktopTauri, isMobile } from '../../platform/env'
+import { saveMobileBlob } from '../../platform/mobileExport'
+import {
+  clearMobileExportJob,
+  hydrateMobileExportJob,
+  loadMobileExportJob,
+  normalizeMobileExportJob,
+  mobileExportResumeCursor,
+  mobileExportJobComplete,
+  saveMobileExportJob,
+  type MobileExportJob,
+} from '../../platform/mobileExportQueue'
+import {
+  isMobileExportCancelled,
+  requestMobileExportCancel,
+  startMobileExportService,
+  stopMobileExportService,
+  updateMobileExportService,
+} from '../../platform/mobileExportService'
+import Icon from '../common/Icon.vue'
+import { registerMobileBackHandler } from '../../platform/mobileBack'
+import RangeSlider from '../common/RangeSlider.vue'
+
+const library = useLibrary()
+const { state } = useFrameConfig()
+const app = useAppState()
+const history = useHistory()
+
+// 默认格式/画质可在「首选项 → 导出」中调整，打开导出页时采用该默认值
+const format = ref<ExportFormat>(getExportFormatPref())
+const jpgQuality = ref(getExportQualityPref())
+const supersample = ref(1)
+// 批量导出回填：开启后每张照片使用导入时解析的自身 EXIF（参数/型号/品牌 Logo）出图，
+// 而非当前编辑器里的全局参数；关闭则全部照片沿用当前编辑参数（含手动改过的文本）。
+const backfillExif = ref(true)
+
+// ===== 批量文本映射（P1-1 补充：混批镜头/机型文本统一替换） =====
+// 仅作用于批量回填路径；规则每行「查找 => 替换」，localStorage 持久化。
+const RULES_KEY = 'frame-text-rules'
+const rulesEnabled = ref(false)
+const rulesText = ref('')
+try {
+  const raw = localStorage.getItem(RULES_KEY)
+  if (raw) {
+    const parsed = JSON.parse(raw) as { enabled?: boolean; text?: string }
+    rulesEnabled.value = !!parsed.enabled
+    rulesText.value = parsed.text ?? ''
+  }
+} catch {
+  /* ignore */
+}
+watch([rulesEnabled, rulesText], () => {
+  try {
+    localStorage.setItem(RULES_KEY, JSON.stringify({ enabled: rulesEnabled.value, text: rulesText.value }))
+  } catch {
+    /* ignore */
+  }
+})
+
+// ===== 导出预览（分辨率/体积实测 + 1:1 查看 + 保存定位） =====
+const preview = ref<{
+  url: string
+  name: string
+  blob: Blob
+  w: number
+  h: number
+  sizeText: string
+} | null>(null)
+const zoom1x = ref(false)
+const saved = ref(false)
+const savedPath = ref<string | null>(null)
+type SaveKind = 'none' | 'desktop' | 'mobile' | 'download'
+const savedKind = ref<SaveKind>('none')
+
+// Android 进程被系统回收后从这里恢复未完成批量任务；开始新任务时会覆盖它。
+const resumeJob = ref<MobileExportJob | null>(isMobile ? loadMobileExportJob() : null)
+const activeMobileJob = ref<MobileExportJob | null>(null)
+const mobilePersistenceFailed = ref(false)
+
+async function markMobileJob(job: MobileExportJob): Promise<MobileExportJob> {
+  const next = normalizeMobileExportJob({ ...job, updatedAt: Date.now() })
+  if (!await saveMobileExportJob(next)) mobilePersistenceFailed.value = true
+  return next
+}
+
+function batchOutputName(item: LibraryItem, index: number, settings: FrozenExportSettings, job: MobileExportJob): string {
+  const stem = item.name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'frame'
+  const suffix = String(index + 1).padStart(3, '0')
+  const jobPart = (job.jobId || 'job').replace(/[^a-zA-Z0-9_-]/g, '').slice(-10) || 'job'
+  return `${stem}_${jobPart}_${suffix}.${settings.format === 'jpg' ? 'jpg' : 'png'}`
+}
+
+// ===== 导出文件夹（桌面端）：选定后导出直接写入，成功弹窗不再需要「保存图片」 =====
+const EXPORT_FOLDER_KEY = 'framelab-export-folder'
+const exportFolder = ref<string | null>(isDesktopTauri ? localStorage.getItem(EXPORT_FOLDER_KEY) : null)
+async function chooseExportFolder() {
+  const { pickExportFolder } = await import('../../platform/fs')
+  const r = await pickExportFolder()
+  if (r) {
+    exportFolder.value = r
+    localStorage.setItem(EXPORT_FOLDER_KEY, r)
+  }
+}
+function clearExportFolder() {
+  exportFolder.value = null
+  localStorage.removeItem(EXPORT_FOLDER_KEY)
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`
+  return `${n} B`
+}
+
+/** 展示导出结果：blob 实测分辨率（预览图即导出成品，实测最准） */
+async function showPreview(
+  blob: Blob,
+  name: string,
+  writtenPath?: string | null,
+  kind: SaveKind = writtenPath ? (isDesktopTauri ? 'desktop' : 'mobile') : 'none',
+) {
+  if (preview.value) URL.revokeObjectURL(preview.value.url)
+  const url = URL.createObjectURL(blob)
+  let w = 0
+  let h = 0
+  try {
+    const im = await loadImage(url)
+    w = im.naturalWidth
+    h = im.naturalHeight
+  } catch {
+    /* 实测失败显示 — */
+  }
+  preview.value = { url, name, blob, w, h, sizeText: formatBytes(blob.size) }
+  zoom1x.value = false
+  savedKind.value = kind
+  saved.value = kind !== 'none'
+  savedPath.value = writtenPath ?? null
+}
+
+function closePreview() {
+  if (preview.value) URL.revokeObjectURL(preview.value.url)
+  preview.value = null
+  saved.value = false
+  savedPath.value = null
+  savedKind.value = 'none'
+}
+
+const removeBackHandler = registerMobileBackHandler(() => {
+  if (!preview.value) return false
+  closePreview()
+  return true
+})
+onBeforeUnmount(removeBackHandler)
+
+// Esc 关闭导出预览（审查报告 U2：弹窗打开时 App 全局快捷键已屏蔽，此处自行响应）
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && preview.value) closePreview()
+}
+function onExportVisibilityChange() {
+  if (isMobile && document.hidden) cancelBatch()
+}
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  document.addEventListener('visibilitychange', onExportVisibilityChange)
+  if (isMobile) {
+    void hydrateMobileExportJob(resumeJob.value).then((job) => {
+      if (job) resumeJob.value = job
+    })
+  }
+})
+// 审查报告 U5：切模块卸载时释放预览 objectURL（PNG 可达数十 MB，此前只在替换/手动
+// 关闭时释放），并终止仍在进行的批量循环（否则后台继续导出、结束时又新建永不释放的 URL）
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('visibilitychange', onExportVisibilityChange)
+  closePreview()
+  if (batch.value.running && activeMobileJob.value) {
+    void markMobileJob({
+      ...activeMobileJob.value,
+      status: 'paused',
+      cursor: batch.value.cursor,
+    })
+  }
+  batch.value.cancelled = true
+})
+
+// ===== 输出预估：当前照片尺寸懒加载缓存 + 任务卡实时估算（与 exporter 同源公式） =====
+const sizeCache = new Map<string, { w: number; h: number }>()
+const activeItem = computed(() => library.items.find((i) => i.id === library.activeId.value) ?? null)
+const activeSize = ref<{ w: number; h: number } | null>(null)
+
+let sizeSeq = 0
+watch(activeItem, async (item) => {
+  const seq = ++sizeSeq
+  activeSize.value = null
+  if (!item) return
+  const hit = sizeCache.get(item.id)
+  if (hit) {
+    activeSize.value = hit
+    return
+  }
+  // 审查报告 U13/U19：优先使用导入时已解析的宽高（LibraryItem 自带），避免为预估
+  // 体积而全尺寸解码原图（96MP 正是内存治理刻意规避的路径）；尺寸未知（0）才回退
+  // 解码，且用 seq 取消过期任务（快速切图不再并发多次解码）。
+  if (item.width && item.height) {
+    const s = { w: item.width, h: item.height }
+    sizeCache.set(item.id, s)
+    if (seq === sizeSeq) activeSize.value = s
+    return
+  }
+  try {
+    const im = await loadImage(item.url)
+    if (seq !== sizeSeq) return
+    const s = { w: im.naturalWidth, h: im.naturalHeight }
+    sizeCache.set(item.id, s)
+    if (seq === sizeSeq && library.activeId.value === item.id) activeSize.value = s
+  } catch {
+    /* 尺寸读取失败：预估显示 —，不阻塞导出 */
+  }
+}, { immediate: true })
+
+/** JPG 体积粗估（B/px 经验系数随画质线性），PNG 不估 */
+const estimate = computed(() => {
+  if (!activeSize.value) return null
+  const { w, h } = estimateExportSize(activeSize.value.w, activeSize.value.h, state, supersample.value)
+  let sizeText = ''
+  if (format.value === 'jpg') {
+    const bytes = w * h * (0.08 + jpgQuality.value * 0.24)
+    sizeText = bytes >= 1024 * 1024 ? `≈ ${(bytes / 1024 / 1024).toFixed(1)} MB` : `≈ ${Math.round(bytes / 1024)} KB`
+  }
+  return { w, h, sizeText }
+})
+
+const selectedCount = computed(() => library.items.filter((i) => i.selected).length)
+const targetCount = computed(() => (selectedCount.value > 0 ? selectedCount.value : library.items.length))
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const im = new Image()
+    im.onload = () => resolve(im)
+    im.onerror = () => reject(new Error('图片加载失败'))
+    im.src = src
+  })
+}
+
+/**
+ * 构建单张导出配置：批量回填开启时用该照片自身 EXIF 覆盖全局文本字段。
+ * 浅拷贝覆盖（不写回全局 state，避免触发预览 CSS 变量与历史提交）；
+ * 无 EXIF 的照片文本置空（导出器对空字符串自动跳过绘制），品牌保留当前选择。
+ * 等效焦距开关开启时按当前开关/系数重拼该照片文本（与编辑器一致）。
+ */
+function configFor(
+  item: LibraryItem,
+  backfill: boolean,
+  baseConfig: FrameConfig = state,
+  rules: Pick<FrozenExportSettings, 'rulesEnabled' | 'rulesText'> = {
+    rulesEnabled: rulesEnabled.value,
+    rulesText: rulesText.value,
+  },
+): FrameConfig {
+  const sourceConfig = { ...baseConfig, photoSrc: item.url }
+  if (!backfill) return sourceConfig
+  const exif = item.exif
+  const apply = makeRuleApplier(rules.rulesText, rules.rulesEnabled)
+  const text = apply(
+    exif && sourceConfig.eqFocal
+      ? buildExifText(exif.raw, { eqFocal: sourceConfig.eqFocal, cropFactor: sourceConfig.cropFactor })
+      : (exif?.text ?? ''),
+  )
+  const dateText = exif?.raw.dateTimeOriginal ? formatDate(exif.raw.dateTimeOriginal, sourceConfig.dateFormat) : ''
+  return {
+    ...sourceConfig,
+    exifText: text,
+    dateText,
+    cameraModel: apply(exif?.model ?? ''),
+    lensText: apply(exif?.lens ?? ''),
+    exifRaw: exif?.raw ?? null,
+    brand: exif?.brandId ?? sourceConfig.brand,
+  }
+}
+
+interface FrozenExportSettings {
+  format: ExportFormat
+  jpgQuality: number
+  supersample: number
+  rulesEnabled: boolean
+  rulesText: string
+}
+
+const currentExportSettings = (): FrozenExportSettings => ({
+  format: format.value,
+  jpgQuality: jpgQuality.value,
+  supersample: supersample.value,
+  rulesEnabled: rulesEnabled.value,
+  rulesText: rulesText.value,
+})
+
+async function renderOne(
+  item: LibraryItem,
+  backfill: boolean,
+  baseConfig: FrameConfig = state,
+  settings: FrozenExportSettings = currentExportSettings(),
+): Promise<Blob> {
+  // 桌面端照片 URL 是 asset 协议：直接绘制会污染画布导致 toBlob 抛
+  // "Tainted canvases may not be exported"（另一台电脑导出失败的根因）。
+  // 经 Rust 读盘取同源 Blob（此前用 dataURL 中转：80MB 照片会物化 107MB base64
+  // 字符串，慢且内存翻倍）；网页端（blob:/data:）短路不经 fs 模块。
+  // 解码用 createImageBitmap（ImageBitmap 可显式 close()）：批量导出逐张
+  // 关闭位图，避免 Chromium 图像缓存按 URL 滞留每张全尺寸解码位图
+  // （96MP ≈ 400MB/张，几十张批量导出会累积到数 GB 直至 OOM）。
+  let src = item.url
+  let revoke: (() => void) | null = null
+  if (/^(?:https?:\/\/asset\.localhost|asset:\/\/localhost)\//.test(src)) {
+    const { readLocalBlob } = await import('../../platform/fs')
+    const hit = src.match(/^(?:https?:\/\/asset\.localhost|asset:\/\/localhost)\/(.+)$/)
+    const blob = await readLocalBlob(decodeURIComponent(hit![1]))
+    src = URL.createObjectURL(blob)
+    revoke = () => URL.revokeObjectURL(src)
+  }
+  try {
+    const srcBlob = await (await fetch(src)).blob()
+    const bitmap = await createImageBitmap(srcBlob)
+    try {
+      const opts: ExportOptions = { format: settings.format, jpgQuality: settings.jpgQuality, scale: settings.supersample }
+      if (baseConfig.bgMode === 'photo' && baseConfig.customBgImage) {
+        opts.backgroundImage = await loadImage(baseConfig.customBgImage)
+      }
+      const res = await exportFrame(bitmap as unknown as ImgSource, configFor(item, backfill, baseConfig, settings), opts)
+      return res.blob
+    } finally {
+      bitmap.close() // 立即释放本张全分辨率位图
+    }
+  } finally {
+    revoke?.()
+  }
+}
+
+/** 导出前置检查：桌面端必须先选定导出文件夹（导出直接写盘） */
+function ensureExportFolder(): boolean {
+  if (!isDesktopTauri || exportFolder.value) return true
+  window.alert('请先在下方「导出文件夹」中选择导出位置')
+  return false
+}
+
+interface SaveOutcome {
+  kind: SaveKind
+  location: string | null
+}
+
+/**
+ * 按平台保存成品：桌面端写入用户选定目录，Android 优先进入 水印小屋 相册，
+ * 浏览器才保留下载兜底。导出面板不再把 Android 当作“桌面保存对话框”处理。
+ */
+async function saveOutput(blob: Blob, name: string): Promise<SaveOutcome> {
+  if (isMobile) {
+    const result = await saveMobileBlob(blob, name)
+    return {
+      kind: result.mode === 'native' ? 'mobile' : 'download',
+      location: result.location,
+    }
+  }
+  if (isDesktopTauri) {
+    const { saveBlobAs } = await import('../../platform/fs')
+    return { kind: 'desktop', location: await saveBlobAs(blob, name) }
+  }
+  downloadBlob(blob, name)
+  return { kind: 'download', location: null }
+}
+
+/** 单张导出进行中标志（审查报告 R13：与批量导出互斥，防止连点并发合成） */
+const singleRunning = ref(false)
+
+// 审查报告 U6：任务条 400ms 延迟收尾会被「400ms 内启动的新任务」误杀（进度条消失、
+// 用户可能重复点击）——统一为可取消的收尾定时器：新任务启动时取消旧的收尾
+let endTaskTimer: number | null = null
+function scheduleEndTask(): void {
+  if (endTaskTimer !== null) clearTimeout(endTaskTimer)
+  endTaskTimer = window.setTimeout(() => {
+    endTaskTimer = null
+    app.endTask()
+  }, 400)
+}
+function cancelPendingEndTask(): void {
+  if (endTaskTimer !== null) {
+    clearTimeout(endTaskTimer)
+    endTaskTimer = null
+  }
+}
+
+/** 导出并弹出预览；选定了导出文件夹时直接写盘（重名自动加序号） */
+async function exportSingle() {
+  const active = library.items.find((i) => i.id === library.activeId.value)
+  if (!active || !ensureExportFolder()) return
+  // 审查报告 R13：与批量导出 / 上一次单张导出互斥——此前连点会并发两次合成，
+  // 两条链路共用全局任务条与同一个预览（后完成者覆盖、提前 endTask 清空进度条）
+  if (batch.value.running || singleRunning.value) return
+  cancelPendingEndTask()
+  singleRunning.value = true
+  app.startTask('导出单张 · ' + active.name)
+  try {
+    // 单张导出 = 当前编辑器所见即所得：state 已随照片切换恢复该照片参数，不回填
+    // （否则会用手动改过的文本会被导入时的原始解析结果覆盖）。
+    const blob = await renderOne(active, false)
+    app.setTaskProgress(1)
+    // 生成预览（blob 实测分辨率/体积）
+    const name = makeExportFilename(format.value, active.name.replace(/\.[^.]+$/, ''))
+    if (isDesktopTauri && exportFolder.value) {
+      const { writeBlobTo } = await import('../../platform/fs')
+      const written = await writeBlobTo(exportFolder.value, name, blob)
+      await showPreview(blob, name, written, 'desktop')
+    } else if (isMobile) {
+      // 手机端原生保存失败必须报错，不能把浏览器下载伪称为相册保存成功。
+      const result = await saveOutput(blob, name)
+      await showPreview(blob, name, result.location, result.kind)
+    } else {
+      // 未选导出文件夹：保持「预览 → 保存图片」流程（网页端也走此路）
+      await showPreview(blob, name)
+    }
+  } catch (e) {
+    window.alert('导出失败：' + ((e as Error)?.message ?? String(e)))
+  } finally {
+    singleRunning.value = false
+    scheduleEndTask()
+  }
+}
+
+/** 保存预览中的图片：按当前平台进入相册、系统保存对话框或浏览器下载。 */
+async function savePreview() {
+  if (!preview.value) return
+  const { blob, name } = preview.value
+  try {
+    const result = await saveOutput(blob, name)
+    savedPath.value = result.location
+    savedKind.value = result.kind
+    saved.value = true
+  } catch (e) {
+    window.alert('保存失败：' + ((e as Error)?.message ?? String(e)))
+  }
+}
+
+/** 桌面端：在资源管理器中定位已保存的文件 */
+async function openSavedFolder() {
+  if (savedKind.value !== 'desktop' || !savedPath.value) return
+  try {
+    const { revealInExplorer } = await import('../../platform/fs')
+    await revealInExplorer(savedPath.value)
+  } catch (e) {
+    window.alert('打开文件夹失败：' + ((e as Error)?.message ?? String(e)))
+  }
+}
+
+// ===== 页内批量进度（导出任务卡展示；顶部全局任务条保留不动） =====
+const batch = ref({
+  running: false,
+  cursor: 0,
+  done: 0,
+  total: 0,
+  label: '',
+  finished: false,
+  cancelled: false,
+  success: 0,
+  failed: [] as { name: string; reason: string }[],
+})
+const batchPreparing = ref(false)
+function cancelBatch() {
+  if (!batch.value.running) return
+  batch.value.cancelled = true
+  const jobId = activeMobileJob.value?.jobId
+  if (jobId) void requestMobileExportCancel(jobId)
+}
+function resetBatch() {
+  batch.value = { running: false, cursor: 0, done: 0, total: 0, label: '', finished: false, cancelled: false, success: 0, failed: [] }
+}
+
+function cloneConfig(config: FrameConfig): FrameConfig {
+  return JSON.parse(JSON.stringify(config)) as FrameConfig
+}
+
+/** 开始批量前先把每张照片当前历史游标的状态取出来，形成不可变快照。 */
+async function freezeConfigs(list: LibraryItem[]): Promise<Record<string, FrameConfig>> {
+  await history.saveAllPending()
+  const configs: Record<string, FrameConfig> = {}
+  const fallback = cloneConfig(state)
+  for (const item of list) {
+    configs[item.id] = (await history.getConfigForPhoto(item.id)) ?? cloneConfig(fallback)
+  }
+  return configs
+}
+
+function jobSettings(job: MobileExportJob): FrozenExportSettings {
+  return {
+    format: job.format,
+    jpgQuality: job.jpgQuality,
+    supersample: job.supersample,
+    rulesEnabled: job.rulesEnabled,
+    rulesText: job.rulesText,
+  }
+}
+
+async function persistMobileProgress(job: MobileExportJob, cursor: number, status: MobileExportJob['status']): Promise<MobileExportJob> {
+  const next = await markMobileJob({ ...job, cursor, status })
+  activeMobileJob.value = next
+  return next
+}
+
+async function runBatch(
+  list: LibraryItem[],
+  settings: FrozenExportSettings,
+  configs: Record<string, FrameConfig>,
+  mobileJob: MobileExportJob | null,
+): Promise<void> {
+  const startCursor = mobileJob ? mobileExportResumeCursor(mobileJob) : 0
+  const folder = exportFolder.value
+  cancelPendingEndTask()
+  batch.value = {
+    running: true,
+    cursor: startCursor,
+    done: startCursor,
+    total: list.length,
+    label: '',
+    finished: false,
+    cancelled: false,
+    success: 0,
+    failed: [],
+  }
+  activeMobileJob.value = mobileJob
+  app.startTask(mobileJob ? '继续批量导出' : '批量导出')
+  let last: { blob: Blob; name: string; location: string | null; kind: SaveKind } | null = null
+  let workingJob = mobileJob
+  if (workingJob?.jobId) {
+    // Keep the notification alive before the first full-size decode. If Android
+    // rejects the foreground start, the existing page queue remains usable and
+    // resumes from the same persisted cursor.
+    await startMobileExportService({
+      jobId: workingJob.jobId,
+      total: list.length,
+      completed: startCursor,
+      label: startCursor ? '继续准备导出' : '准备导出',
+    })
+  }
+  try {
+    for (let i = startCursor; i < list.length; i++) {
+      // 中途取消：当前张渲染完成后停止，cursor 保留为下一张的索引。
+      if (batch.value.cancelled) break
+      if (workingJob?.jobId && await isMobileExportCancelled(workingJob.jobId)) {
+        batch.value.cancelled = true
+        break
+      }
+      const item = list[i]
+      batch.value.label = item.name
+      // 写盘成功后游标尚未来得及落盘时，恢复任务会带着 completed 标记回来；
+      // 复用同一批的成品，不重复渲染/写入这一张。
+      if (workingJob?.completed?.[item.id]) {
+        batch.value.success++
+        batch.value.cursor = i + 1
+        batch.value.done = i + 1
+        workingJob = await persistMobileProgress(workingJob, i + 1, 'running')
+        app.setTaskProgress((i + 1) / list.length)
+        continue
+      }
+      // 审查报告 R4：单张失败不得中断整批，逐张记录后继续下一张。
+      try {
+        const base = configs[item.id] ?? workingJob?.baseConfig ?? state
+        const blob = await renderOne(item, workingJob?.backfillExif ?? backfillExif.value, base, settings)
+        const name = workingJob && isMobile
+          ? batchOutputName(item, i, settings, workingJob)
+          : makeExportFilename(settings.format, item.name.replace(/\.[^.]+$/, ''))
+        let location: string | null = null
+        if (folder && isDesktopTauri) {
+          const { writeBlobTo } = await import('../../platform/fs')
+          const written = await writeBlobTo(folder, name, blob)
+          last = { blob, name, location: written, kind: 'desktop' }
+          location = written
+        } else if (isMobile) {
+          const result = await saveOutput(blob, name)
+          last = { blob, name, location: result.location, kind: result.kind }
+          location = result.location
+        } else {
+          downloadBlob(blob, name)
+          last = { blob, name, location: null, kind: 'download' }
+        }
+        batch.value.success++
+        if (workingJob && isMobile) {
+          workingJob = await markMobileJob({
+            ...workingJob,
+            completed: {
+              ...(workingJob.completed ?? {}),
+              [item.id]: { name, location, savedAt: Date.now() },
+            },
+          })
+        }
+      } catch (e) {
+        batch.value.failed.push({ name: item.name, reason: (e as Error)?.message ?? String(e) })
+      }
+      batch.value.cursor = i + 1
+      batch.value.done = i + 1
+      if (workingJob) workingJob = await persistMobileProgress(workingJob, i + 1, 'running')
+      if (workingJob?.jobId) {
+        void updateMobileExportService({
+          jobId: workingJob.jobId,
+          total: list.length,
+          completed: i + 1,
+          label: i + 1 >= list.length ? '即将完成' : item.name,
+        })
+      }
+      app.setTaskProgress((i + 1) / list.length)
+      await new Promise((r) => setTimeout(r, 30))
+    }
+    batch.value.finished = true
+  } catch (e) {
+    // 意外异常（列表迭代本身出错等）：记录后仍走 finally 收尾。
+    batch.value.failed.push({ name: batch.value.label, reason: `批量流程异常：${(e as Error)?.message ?? e}` })
+    batch.value.finished = true
+  } finally {
+    batch.value.running = false
+    if (workingJob) {
+      const completed = mobileExportJobComplete(workingJob)
+      if (completed) {
+        const cleared = await clearMobileExportJob()
+        if (!cleared) mobilePersistenceFailed.value = true
+        resumeJob.value = cleared ? null : workingJob
+        activeMobileJob.value = null
+      } else {
+        const paused = await persistMobileProgress(workingJob, mobileExportResumeCursor(workingJob), 'paused')
+        resumeJob.value = paused
+        activeMobileJob.value = null
+      }
+      if (workingJob.jobId) await stopMobileExportService(workingJob.jobId)
+    }
+    // 批量导出也弹预览（最后一张成功图）；已写盘/入相册时弹窗进入已保存态。
+    if (last && !batch.value.cancelled) void showPreview(last.blob, last.name, last.location, last.kind)
+    scheduleEndTask()
+  }
+}
+
+async function exportBatch() {
+  // 默认只导出当前正在编辑的照片（用户反馈：此前无勾选时默认导出全部，容易误导出几十张）；
+  // 需要批量时先勾选（「全选」后即导出全部），选中数量一目了然。
+  const selected = library.items.filter((i) => i.selected)
+  const list = selected.length > 0 ? selected : activeItem.value ? [activeItem.value] : []
+  if (!list.length || batch.value.running || batchPreparing.value || !ensureExportFolder()) return
+  batchPreparing.value = true
+  try {
+    const configs = await freezeConfigs(list)
+    const settings = currentExportSettings()
+    const job: MobileExportJob | null = isMobile
+      ? normalizeMobileExportJob({
+          version: 1,
+          status: 'running',
+          ids: list.map((item) => item.id),
+          cursor: 0,
+          format: settings.format,
+          jpgQuality: settings.jpgQuality,
+          supersample: settings.supersample,
+          backfillExif: backfillExif.value,
+          rulesEnabled: settings.rulesEnabled,
+          rulesText: settings.rulesText,
+          baseConfig: cloneConfig(state),
+          configs,
+          completed: {},
+          updatedAt: Date.now(),
+        })
+      : null
+    if (job) {
+      resumeJob.value = null
+      activeMobileJob.value = await markMobileJob(job)
+    }
+    await runBatch(list, settings, configs, job)
+  } catch (e) {
+    window.alert('批量导出准备失败：' + ((e as Error)?.message ?? String(e)))
+  } finally {
+    batchPreparing.value = false
+  }
+}
+
+async function resumeBatch() {
+  const job = resumeJob.value
+  if (!job || batch.value.running || batchPreparing.value) return
+  const list = job.ids.map((id) => library.items.find((item) => item.id === id) ?? null)
+  if (list.some((item): item is null => item === null)) {
+    window.alert('上次批量任务中的部分照片已不在图库中，请先恢复这些照片后再继续。')
+    return
+  }
+  batchPreparing.value = true
+  try {
+    format.value = job.format
+    jpgQuality.value = job.jpgQuality
+    supersample.value = job.supersample
+    backfillExif.value = job.backfillExif
+    rulesEnabled.value = job.rulesEnabled
+    rulesText.value = job.rulesText
+    resumeJob.value = null
+    await runBatch(list as LibraryItem[], jobSettings(job), job.configs ?? {}, job)
+  } finally {
+    batchPreparing.value = false
+  }
+}
+
+async function discardResumeJob() {
+  if (!await clearMobileExportJob()) {
+    mobilePersistenceFailed.value = true
+    return
+  }
+  resumeJob.value = null
+}
+
+// ===== 照片选择（与图库/胶片条多选逻辑一致） =====
+function onThumbClick(item: { id: string }, e: MouseEvent) {
+  if (e.metaKey || e.ctrlKey) {
+    library.toggleSelect(item.id)
+  } else if (e.shiftKey) {
+    library.rangeSelect(item.id)
+  } else {
+    // 普通点击：切换「当前照片」（预览/编辑），不清空勾选集合——
+    // 勾选由右上角圆圈独立控制，避免预览时已勾选导出的照片全部丢失；
+    // setActiveKeepSelection 同步范围锚点，Shift 范围多选从此处可预期
+    library.setActiveKeepSelection(item.id)
+  }
+}
+
+// 编辑画布右键「导出当前照片」请求：切到导出页后自动触发一次单张导出。
+// immediate：Workspace 先置位再切模块，ExportPanel 挂载时值已为 true（无后续变更），
+// 必须挂载即消费一次。
+watch(
+  () => app.pendingSingleExport.value,
+  (v) => {
+    if (!v) return
+    app.pendingSingleExport.value = false
+    if (library.activeId.value) void exportSingle()
+  },
+  { immediate: true },
+)
+</script>
+
+<template>
+  <div class="export-view">
+    <header class="page-head">
+      <h2 class="title">导出</h2>
+      <p class="sub">配置成品输出参数，支持单张 / 批量导出。所有处理在本地完成。手机端默认保存到 水印小屋 相册。</p>
+      <p v-if="isMobile" class="sub">导出时请保持软件前台和屏幕亮起。切换应用或锁屏将请求暂停批量任务；返回后可继续，已保存的照片会跳过。</p>
+    </header>
+
+    <section v-if="isMobile && resumeJob" class="card resume-card">
+      <div class="resume-copy">
+        <strong>发现未完成的批量任务</strong>
+        <span>已保存 {{ resumeJob.ids.filter(id => !!resumeJob?.completed?.[id]).length }} / {{ resumeJob.ids.length }} 张，继续后使用开始时冻结的参数，并重试失败照片。</span>
+      </div>
+      <div class="resume-actions">
+        <button class="btn primary" :disabled="batchPreparing || batch.running" @click="resumeBatch">继续导出</button>
+        <button class="btn dim" :disabled="batchPreparing || batch.running" @click="discardResumeJob">放弃任务</button>
+      </div>
+    </section>
+    <p v-if="isMobile && mobilePersistenceFailed" class="mobile-persistence-warning">
+      手机本地任务记录保存失败；当前批次仍会继续，但被系统终止后可能无法自动续传。
+    </p>
+
+    <!-- 双栏自适应布局：≥1100px 左（配置）/ 右（选片），窄屏自动堆叠 -->
+    <div class="layout">
+      <div class="col side">
+        <!-- 导出文件夹（桌面端）：导出前必须先选定，置顶显眼展示 -->
+        <section v-if="isDesktopTauri" class="card folder-card" :class="{ missing: !exportFolder }">
+          <div class="group-head">
+            <Icon name="folder" />
+            <h3>导出文件夹</h3>
+            <span class="head-hint">{{ exportFolder ? '导出将直接写入此文件夹' : '导出前必须先选定' }}</span>
+          </div>
+          <div class="row folder-row">
+            <span class="folder-path" :title="exportFolder || ''">{{ exportFolder || '未选择 — 请点击「选择文件夹」指定导出位置' }}</span>
+            <button class="btn" :class="{ primary: !exportFolder }" @click="chooseExportFolder">选择文件夹</button>
+            <button v-if="exportFolder" class="btn dim" @click="clearExportFolder">清除</button>
+          </div>
+        </section>
+
+        <!-- 输出设置 -->
+        <section class="card">
+          <div class="group-head">
+            <Icon name="photo" />
+            <h3>输出设置</h3>
+            <span class="head-hint">格式 · 画质 · 尺寸</span>
+          </div>
+          <div class="row">
+            <label>格式</label>
+            <div class="seg">
+              <button :class="{ on: format === 'png' }" @click="format = 'png'">PNG 无损</button>
+              <button :class="{ on: format === 'jpg' }" @click="format = 'jpg'">JPG 高画质</button>
+            </div>
+          </div>
+          <div v-if="format === 'jpg'" class="row">
+            <label>画质</label>
+            <RangeSlider v-model="jpgQuality" :min="0.5" :max="1" :step="0.01" />
+          </div>
+          <div class="row">
+            <label title="导出时先把画布放大到目标尺寸的 N 倍渲染，再把文字 / Logo / 模糊背景等装饰以更高精度绘制后缩回，成片装饰层更锐利（照片本身始终是原生分辨率）。倍率越高导出越慢、内存占用越大，日常导出 1x 已足够清晰。">超采样</label>
+            <div class="seg">
+              <button :class="{ on: supersample === 1 }" @click="supersample = 1">1x</button>
+              <button :class="{ on: supersample === 2 }" @click="supersample = 2">2x</button>
+              <button :class="{ on: supersample === 3 }" @click="supersample = 3">3x</button>
+            </div>
+          </div>
+          <p class="hint">渲染倍率：倍率越高，文字 / Logo / 模糊背景越锐利，导出越慢；1x 日常已足够。</p>
+          <div class="divider" />
+          <div class="row">
+            <label title="批量导出时每张照片使用自己导入时解析出的 EXIF 参数、拍摄日期、相机型号与品牌 Logo（而不是全部套用当前编辑器里的文本），适合索尼 / 无人机 / 手机等不同来源的照片混批导出；无 EXIF 的照片对应文本置空。">批量回填</label>
+            <label class="check" title="开启后批量导出的每张照片使用各自导入时解析的 EXIF、相机型号与品牌 Logo">
+              <input type="checkbox" v-model="backfillExif" />
+              <span>每张照片使用自身 EXIF / 型号 / 品牌</span>
+            </label>
+          </div>
+          <div class="row">
+            <label title="批量回填导出时，按你写的规则批量替换每张照片的 EXIF 文本 / 相机型号 / 镜头型号。每行一条规则，格式为「查找 => 替换」，多条规则按从上到下顺序依次生效。适合统一不同相机对同一镜头的命名等场景，例如：腾龙28-200 E A071 => 腾龙 28-200。规则会自动保存，下次打开仍在。">文本映射</label>
+            <label class="check" title="批量导出时按规则替换各照片的 EXIF 文本 / 相机型号 / 镜头型号（仅影响批量回填）">
+              <input type="checkbox" v-model="rulesEnabled" />
+              <span>启用批量文本映射</span>
+            </label>
+          </div>
+          <div v-if="rulesEnabled" class="row">
+            <textarea
+              v-model="rulesText"
+              class="rules-area"
+              rows="3"
+              spellcheck="false"
+              placeholder="每行一条：查找 => 替换&#10;如 腾龙28-200 E A071 => 腾龙 28-200"
+            ></textarea>
+          </div>
+        </section>
+      </div>
+
+      <!-- 照片选择（网格） -->
+      <section class="card select">
+        <div class="group-head">
+          <Icon name="photo" />
+          <h3>选择要导出的照片</h3>
+          <span class="count">已选 {{ selectedCount }} / {{ library.items.length }} 张</span>
+        </div>
+        <div class="row tools">
+          <button class="btn" :disabled="!library.items.length" @click="library.selectAll()">全选</button>
+          <button class="btn" :disabled="!selectedCount" @click="library.selectNone()">取消全选</button>
+          <span v-if="isMobile" class="hint-inline">点选右上角圆圈选择照片。未选择时仅导出当前照片。</span>
+          <span v-else class="hint-inline">点击预览 · 右上角圆圈勾选导出 · Shift+点击范围多选 · 未勾选时批量导出仅导出当前照片，导出全部请先「全选」</span>
+        </div>
+        <div v-if="library.items.length === 0" class="hint">图库暂无照片，请先在图库模块导入。</div>
+        <div v-else class="thumb-grid">
+          <div
+            v-for="item in library.items"
+            :key="item.id"
+            class="thumb"
+            :class="{ selected: item.selected, active: item.id === library.activeId.value }"
+            :title="`${item.name}${item.selected ? '（已选中）' : ''}`"
+            @click="onThumbClick(item, $event)"
+          >
+            <img v-if="item.thumbUrl" :src="item.thumbUrl" :alt="item.name" loading="lazy" />
+            <div v-else class="thumb-placeholder" />
+            <span class="thumb-name">{{ item.name }}</span>
+            <span
+              class="select-dot"
+              :class="{ on: item.selected }"
+              :title="item.selected ? '取消选择该照片' : '选择该照片'"
+              @click.stop="library.toggleSelect(item.id)"
+            ></span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 吸底任务卡 -->
+    <section class="card taskbar">
+      <div class="estimate" v-if="estimate">
+        <span class="est-title">输出</span>
+        <span class="est-val">≈ {{ estimate.w }} × {{ estimate.h }} px</span>
+        <span v-if="estimate.sizeText" class="est-val">{{ estimate.sizeText }}</span>
+      </div>
+      <div class="estimate" v-else>
+        <span class="est-title">输出</span>
+        <span class="est-val">—</span>
+      </div>
+
+      <div class="progress-zone">
+        <template v-if="batch.running">
+          <div class="prog-line">
+            <div class="prog-track"><div class="prog-fill" :style="{ width: (batch.total ? (batch.done / batch.total) * 100 : 0) + '%' }" /></div>
+            <span class="prog-text">{{ batch.done }}/{{ batch.total }} · {{ batch.label }}</span>
+            <button class="btn danger" @click="cancelBatch">取消</button>
+          </div>
+        </template>
+        <template v-else-if="batch.finished">
+          <div class="summary">
+            <span class="sum-ok">✓ 成功 {{ batch.success }}</span>
+            <span v-if="batch.failed.length" class="sum-bad">· 失败 {{ batch.failed.length }}</span>
+            <span v-if="batch.cancelled" class="sum-dim">（已取消）</span>
+            <button class="btn dim" @click="resetBatch">清除</button>
+          </div>
+          <div v-if="batch.failed.length" class="fail-list">
+            <div v-for="f in batch.failed.slice(0, 5)" :key="f.name" class="fail-item" :title="f.reason">{{ f.name }} — {{ f.reason }}</div>
+            <div v-if="batch.failed.length > 5" class="fail-item dim">等 {{ batch.failed.length }} 张失败</div>
+          </div>
+        </template>
+      </div>
+
+      <div class="btns">
+        <button class="btn primary big" :disabled="!library.activeId.value || batch.running || batchPreparing || singleRunning" @click="exportSingle">导出当前照片</button>
+        <button class="btn" :disabled="!targetCount || batch.running || batchPreparing || singleRunning" @click="exportBatch">
+          批量导出（{{ selectedCount ? selectedCount + ' 张选中' : '当前照片' }}）
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 导出预览弹窗 -->
+  <div v-if="preview" class="preview-mask" @click.self="closePreview">
+    <div class="preview-box">
+      <div class="preview-head">
+        <span class="preview-title">导出成功</span>
+        <button class="preview-close" title="关闭" @click="closePreview">×</button>
+      </div>
+      <div class="preview-img-wrap" :class="{ zoom: zoom1x }" @click="zoom1x = !zoom1x">
+        <img :src="preview.url" :alt="preview.name" class="preview-img" :class="{ one: zoom1x }" />
+      </div>
+      <div class="preview-foot">
+        <span class="preview-name" :title="preview.name">{{ preview.name }}</span>
+        <span class="preview-meta">{{ preview.w && preview.h ? preview.w + ' × ' + preview.h + ' px' : '—' }}</span>
+        <span class="preview-meta">{{ preview.sizeText }}</span>
+        <span v-if="savedKind === 'desktop' && savedPath" class="preview-saved" :title="savedPath">已导出到文件夹 ✓</span>
+        <span v-else-if="savedKind === 'mobile'" class="preview-saved">已保存到 水印小屋 相册 ✓</span>
+        <span v-else-if="savedKind === 'download'" class="preview-saved">已下载文件 ✓</span>
+        <button v-if="savedKind === 'desktop' && savedPath" class="btn primary" @click="openSavedFolder">打开所在文件夹</button>
+        <button v-else-if="savedKind !== 'mobile'" class="btn primary" @click="savePreview">{{ savedKind === 'download' ? '再次保存' : '保存图片' }}</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/* ===== 页面容器：流式宽度 + 流式内边距，窄到宽全程自适应 ===== */
+.export-view {
+  height: 100%;
+  overflow: auto;
+  padding: clamp(10px, 1.6vh, 20px) clamp(14px, 2.4vw, 32px) 12px;
+  background: var(--shell);
+  max-width: 1220px;
+  margin: 0 auto;
+}
+.page-head { margin-bottom: clamp(8px, 1.2vh, 14px); }
+.resume-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+  border-color: #6d55b5;
+  background: color-mix(in srgb, var(--panel) 86%, #7c3aed 14%);
+}
+.resume-copy { min-width: 0; display: grid; gap: 4px; }
+.resume-copy strong { color: var(--text); font-size: 14px; line-height: 20px; }
+.resume-copy span { color: var(--text-dim); font-size: 12px; line-height: 18px; }
+.resume-actions { display: flex; flex: none; gap: 8px; }
+.mobile-persistence-warning {
+  margin: -4px 0 12px;
+  color: #f2c477;
+  font-size: 12px;
+  line-height: 18px;
+}
+.title {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 18px;
+  margin: 0 0 4px;
+  color: var(--text);
+}
+.sub {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  margin: 0;
+}
+/* ===== 双栏自适应布局：≥1100px 左（配置列，定宽）/ 右（选片列，弹性）；
+   窄屏自动回落为单列堆叠，配置卡片在前、选片在后 ===== */
+.layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+@media (min-width: 1100px) {
+  .layout {
+    grid-template-columns: minmax(330px, 400px) minmax(0, 1fr);
+    align-items: start;
+  }
+  .col.side {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+  }
+  /* 宽屏下选片区与左栏等高铺满，缩略图区随视口高度伸缩 */
+  .select .thumb-grid {
+    max-height: clamp(240px, calc(100vh - 420px), 560px);
+  }
+}
+/* 中等宽度以下：工具行允许换行，提示语独占一行 */
+@media (max-width: 860px) {
+  .row.tools { flex-wrap: wrap; row-gap: 4px; }
+  .row.tools .hint-inline { flex-basis: 100%; margin-left: 0; }
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  padding: 12px 14px;
+}
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  color: var(--text-dim);
+}
+.group-head h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.head-hint { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+.divider { height: 1px; background: var(--border); margin: 10px 0; }
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  line-height: 16px;
+}
+.row > label:first-child {
+  width: 56px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.row.tools { margin-bottom: 8px; gap: 8px; }
+.seg {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  overflow: hidden;
+  height: 24px;
+}
+.seg button {
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border: none;
+  border-right: 1px solid var(--border);
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  cursor: pointer;
+  height: 100%;
+}
+.seg button:last-child { border-right: none; }
+.seg button:hover { background: var(--hover); color: var(--text); }
+.seg button.on {
+  background: var(--text);
+  color: var(--shell);
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.check input {
+  margin: 0;
+}
+.rules-area {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  min-height: 54px;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  font-family: inherit;
+  resize: vertical;
+}
+.hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+  line-height: 16px;
+}
+.count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+  line-height: 16px;
+}
+.hint-inline {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+  line-height: 16px;
+  margin-left: auto;
+}
+.thumb-grid {
+  display: grid;
+  /* 缩略图宽度随容器伸缩：宽屏自动放大、窄屏保持可点尺寸 */
+  grid-template-columns: repeat(auto-fill, minmax(clamp(96px, 12vw, 132px), 1fr));
+  gap: 8px;
+  /* 纵向高度随视口伸缩（窄屏矮一些，宽屏高一些），超出滚动 */
+  max-height: clamp(200px, 34vh, 400px);
+  overflow-y: auto;
+  padding: 2px;
+}
+.thumb {
+  position: relative;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  overflow: hidden;
+  cursor: pointer;
+}
+.thumb:hover {
+  background: var(--hover);
+  border-color: var(--border);
+}
+.thumb.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.thumb.active {
+  border-color: var(--text);
+}
+.thumb.selected.active {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.thumb img {
+  display: block;
+  width: 100%;
+  height: 76px;
+  object-fit: cover;
+  background: var(--canvas-empty);
+}
+/* 缩略图未就绪占位（不再回退原图，避免大图解码 OOM） */
+.thumb .thumb-placeholder {
+  width: 100%;
+  height: 76px;
+  background: var(--canvas-empty);
+}
+.thumb-name {
+  display: block;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+  line-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.select-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2; /* 确保勾选圆圈始终浮于缩略图与文件名之上，可点区域稳定 */
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.95);
+  background: rgba(0, 0, 0, 0.38);
+  box-sizing: border-box;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.select-dot:hover {
+  background: rgba(0, 0, 0, 0.58);
+}
+.select-dot.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.select-dot.on::after {
+  content: '✓';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 400;
+}
+.btn {
+  background: var(--btn-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 0;
+  padding: 0 16px;
+  height: 26px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  cursor: pointer;
+}
+.btn:hover { background: var(--hover); color: var(--text-normal); }
+.btn:active { background: var(--pressed); }
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: var(--accent);
+  color: var(--text);
+  border-color: var(--accent);
+}
+.btn.primary:hover { background: var(--hover); }
+.btn.big { height: 30px; padding: 0 20px; }
+.btn.danger { color: var(--text); border-color: var(--accent); }
+.btn.dim { opacity: 0.7; height: 20px; padding: 0 8px; font-size: 11px; }
+.btns {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: none;
+}
+
+/* 导出文件夹卡片（页面顶部，导出前必须选定） */
+.folder-card {
+  margin-bottom: 14px;
+}
+.folder-card.missing {
+  border-color: #c0392b;
+}
+.folder-row {
+  align-items: center;
+}
+.folder-card .folder-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 长路径省略左侧，保留末级目录名 */
+  text-align: left;
+}
+
+/* 吸底任务卡：宽屏单行三段（预估/进度/按钮），窄屏纵向堆叠 */
+.taskbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.18);
+  padding: 10px 14px;
+}
+@media (max-width: 900px) {
+  .taskbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .estimate { flex: 1 1 auto; }
+  .btns { flex: 1 1 100%; }
+  .btns .btn { flex: 1; min-width: 0; padding: 0 8px; }
+}
+@media (max-width: 620px) {
+  .resume-card { align-items: stretch; flex-direction: column; }
+  .resume-actions { width: 100%; }
+  .resume-actions .btn { flex: 1; min-height: 44px; }
+}
+.estimate { display: flex; align-items: baseline; gap: 8px; flex: none; }
+.est-title { font-size: 11px; color: var(--text-dim); }
+.est-val { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.progress-zone { flex: 1; min-width: 0; }
+.prog-line { display: flex; align-items: center; gap: 8px; }
+.prog-track { flex: 1; height: 4px; background: var(--panel-2); border: 1px solid var(--border); }
+.prog-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+.prog-text { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+.summary { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sum-ok { color: var(--text); }
+.sum-bad { color: var(--text-dim); }
+.sum-dim { color: var(--text-dim); }
+.fail-list { margin-top: 4px; }
+.fail-item { font-size: 11px; color: var(--text-dim); line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fail-item.dim { opacity: 0.7; }
+
+/* ===== 导出预览弹窗（无玻璃拟态/无圆角/灰度） ===== */
+.preview-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.preview-box {
+  /* 弹窗宽度：大屏封顶 1100px，小屏占满 92vw，全尺寸下图片区域最大化 */
+  width: min(1100px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.preview-title {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 18px;
+  color: var(--text);
+}
+.preview-close {
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.preview-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.preview-img-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--canvas-loaded);
+  padding: 12px;
+  cursor: zoom-in;
+}
+.preview-img-wrap.zoom { cursor: zoom-out; }
+.preview-img {
+  display: block;
+  max-width: 100%;
+  /* 图片高度随弹窗可用空间伸缩（弹窗 88vh 减去头/脚约 100px） */
+  max-height: calc(88vh - 110px);
+  object-fit: contain;
+  margin: 0 auto;
+}
+.preview-img.one { max-width: none; max-height: none; cursor: zoom-out; }
+.preview-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-height: 36px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+.preview-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preview-meta { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.preview-saved { font-size: 11px; color: var(--text); white-space: nowrap; }
+/* 预览弹窗窄屏：文件名独占一行，元信息与按钮自动换行 */
+@media (max-width: 700px) {
+  .preview-name { max-width: 100%; flex-basis: 100%; }
+  .preview-foot .btn { margin-left: auto; }
+}
+/* 导出文件夹行：窄屏换行（路径独占一行，按钮随行） */
+@media (max-width: 620px) {
+  .folder-row { flex-wrap: wrap; }
+  .folder-card .folder-path { flex-basis: 100%; }
+  .head-hint { display: none; }
+}
+</style>

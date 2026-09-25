@@ -1,0 +1,315 @@
+# Frame · 项目计划规划表
+
+> 本文档是项目的**进度跟踪与规划基准**，记录已完成与未完成事务。后续所有规划、推进、验收均以此为对照参考。每完成一项须及时更新状态。
+>
+> 设计依据：[设计文档 spec](./superpowers/specs/2026-08-13-photo-frame-watermark-design.md)
+> 最近更新：2026-09-11
+
+---
+
+## 一、关键决策（已定，勿反复）
+
+| 维度 | 决策 |
+|---|---|
+| 形态 | Tauri 2 桌面版（Windows NSIS / macOS app+dmg）+ 网页端，含 updater 自动更新 |
+| 功能范围 | 完整复刻 αPro + 保真导出改进 |
+| 技术栈 | Vite + Vue 3 (`<script setup>` + TS) + 原生 Canvas + exifr |
+| 视觉风格 | 忠实复刻原版（暗色磨砂玻璃 + 棋盘格预览 + Light/Dark 主题） |
+| 架构 | 方案 A：混合状态驱动 + Canvas 手工合成导出 |
+| 品牌 Logo | 26 个品牌，SimpleIcons（CC0）官方矢量 + 文字标记兜底（规避商标版权），暗白双版 + 自由着色 |
+
+---
+
+## 二、总体进度仪表盘
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| 0. 立项与设计 | ✅ 已完成 | 需求分析、决策、架构选型、spec |
+| 1. 基础设施 | ✅ 已完成 | 脚手架、类型、CSS 变量、git |
+| 2. 核心数据流 | ✅ 已完成 | useFrameConfig + useCssVars + core/constants（单一数据源已就绪，预览变量驱动打通） |
+| 3. 预览容器与背景 | ✅ 已完成 | `bgRenderer.ts`(提前) + FrameContainer / BgCanvas / Workspace / MainPhoto / FooterInfo 全部就绪 |
+| 4. 主照片与底部信息 | ✅ 已完成 | MainPhoto / FooterInfo 预览组件 ✅；FooterInfo 逻辑已内嵌进 `exporter.ts` ✅ |
+| 5. 通用控件 | ✅ 已完成 | RangeSlider / ToggleGroup / GlassModal |
+| 6. 控制面板与子控件 | ✅ 已完成 | ControlPanel + 5 个 controls（接导出触发） |
+| 7. EXIF 识别 | ✅ 已完成 | useExif（exifr 读取4标签→拼接 Xmm f/X 1/Xs ISOX） |
+| 8. 品牌 Logo 系统 | ✅ 已完成 | useLogoStore 矢量自绘 + 暗白双版（版权安全，见风险项） |
+| 9. 自定义 Logo | ✅ 已完成 | IndexedDB 持久化 + 上传/列表/删除/上限 |
+| 10. 背景模式 | ✅ 已完成 | 三种模式 UI + none 叠加位置控件 + 变暗区分 + 无边框铺满 |
+| 11. 保真导出 | ✅ 已完成 | `exporter.ts`（PNG 无损 / JPG 高画质双选项 + 原生分辨率排版 + 边界保护） |
+| 12. 历史记录 | ✅ 已完成 | useHistory 抽离 + 保存/恢复/删除/清空 |
+| 13. 批量处理 | ✅ 已完成 | 多图递归导出 + 预设 + 回填EXIF + 失败汇总 |
+| 14. 视觉还原与响应式 | ✅ 已完成 | 磨砂卡片分组 / 棋盘格 / Light·Dark 主题切换（body class + token）/ 768px 上下布局 / 导出界面全尺寸响应式（v0.2.0） |
+| 15. 错误处理与边界 | ✅ 已完成 | 加载失败弹窗/预览主图失败占位/导出失败弹窗/EXIF回退/Logo上限/批量容错 |
+| 16. 验收 | ✅ 已完成 | 手动验证清单（2026-08-14 全部通过，导出真机实跑 P1 达成） |
+| 17. 后续演进 | 🟡 部分 | ✅ 桌面版（Tauri 2 + updater）、35mm 等效焦距 / 镜头识别、水印叠加；⬜ 拼图 / 滤镜 / 内嵌 Web Font |
+
+图例：✅ 已完成 / ⏳ 进行中 / ⬜ 未开始
+
+---
+
+## 三、分阶段任务清单
+
+### 阶段 0 · 立项与设计 ✅
+- [x] 分析参考实现 αPro（功能/技术栈/原理/局限）
+- [x] 澄清关键决策（形态/范围/技术栈/视觉/Logo）
+- [x] 架构方案选型（方案 A：混合状态驱动 + Canvas 保真导出）
+- [x] 编写设计文档 spec 并自审
+- [x] 确认品牌方案（14 品牌 + 网搜 SVG）
+
+### 阶段 1 · 基础设施 ✅
+- [x] git 仓库初始化（main 分支）
+- [x] Vite + Vue3 + TS 脚手架（package.json / vite.config / tsconfig）
+- [x] 目录骨架（components/composables/core 等）
+- [x] 依赖安装（vue / exifr / vue-tsc）
+- [x] `FrameConfig` 类型与默认值（`src/core/types.ts`）
+- [x] 全套 CSS 变量回退值（`src/style.css`）
+- [x] 入口文件（main.ts / App.vue / index.html）
+- [x] dev server 验证可运行（http://localhost:5173/）
+- [x] git 提交（脚手架 + spec）
+
+### 阶段 2 · 核心数据流 ✅
+- [x] `composables/useFrameConfig.ts`：模块级单例 reactive frameConfig + loadConfig/patch/reset
+- [x] `composables/useCssVars.ts`：watch frameConfig → 写 `:root` CSS 变量（深度 watch + flush:'sync'）
+- [x] `core/constants.ts`：品牌表(14)、字体表(8)、参数范围、上限常量
+- [x] `main.ts` 接入：启动即同步 CSS 变量；`style.css` 补全变量回退值（与 VAR_MAP 对齐）
+- [ ] 验证：改一个参数 → 预览实时更新（待阶段3预览组件可见后人工验收）
+
+### 阶段 3 · 预览容器与背景 ✅
+- [x] `core/bgRenderer.ts`：`drawImageProp` cover 算法 + 模糊背景（向外扩 blur*3）— 已提前实现（导出复用）
+- [x] `components/preview/BgCanvas.vue`：canvas 渲染模糊背景（随 image/blur/bgMode/theme 实时刷新）
+- [x] `components/preview/MainPhoto.vue`：主照片容器，宽(scale%)/圆角/阴影由 CSS 变量驱动
+- [x] `components/preview/FooterInfo.vue`：brand + 相机型号 + EXIF，全部 CSS 变量驱动（Logo 占位待阶段8）
+- [x] `components/preview/FrameContainer.vue`：1200px 边框容器，CSS 变量驱动 padding 布局
+- [x] `components/layout/Workspace.vue`：右栏 + `fitPreview` 缩放(上限1.0) + 棋盘格透明预览区 + 临时上传入口
+- [x] `App.vue` 接入 Workspace，形成首个可视化闭环（预览实时响应 frameConfig）背景
+
+### 阶段 4 · 主照片与底部信息 ✅
+- [x] `components/preview/MainPhoto.vue`：主照片容器（width = 原图缩放%）
+- [x] `components/preview/FooterInfo.vue`：brand-container + exif-text
+- [x] 无背景模式下 footer 以 absolute 叠加（位置可调，阶段10已实现）
+
+### 阶段 5 · 通用控件 ✅
+- [x] `components/common/RangeSlider.vue`：滑块 + 进度填充 + 数值显示
+- [x] `components/common/ToggleGroup.vue`：切换按钮组（背景模式/主题/开关等）
+- [x] `components/common/GlassModal.vue`：磨砂弹窗（提示/输入/确认，Teleport 到 body）
+
+### 阶段 6 · 控制面板与子控件 ✅
+- [x] `components/layout/ControlPanel.vue`：左栏容器，组合 5 个 controls
+- [x] `components/controls/ImageSource.vue`：单图上传 + **导出 PNG / JPG 按钮（接 exporter）**
+- [x] `components/controls/BackgroundMode.vue`：三种背景模式切换 + 自定义背景图上传
+- [x] `components/controls/LayoutStyle.vue`：模糊/边框/缩放/圆角/阴影（无背景模式 disabled）
+- [x] `components/controls/BrandExif.vue`：品牌下拉 + Logo/型号/EXIF 开关与参数 + 间距
+- [x] `components/controls/HistoryList.vue`：复用 `useHistory`，保存/恢复/删除/清空（localStorage ≤100）
+
+### 阶段 7 · EXIF 识别 ✅
+- [x] `composables/useExif.ts`：exifr 读取 FocalLength/FNumber/ExposureTime/ISO
+- [x] 拼接格式 `Xmm f/X 1/Xs ISOX`（快门 <1s 转 1/n，≥1s 显示 ns；焦距保留一位小数）
+- [x] `BrandExif.vue` 新增"识别 Exif"按钮：选图 → parseExif → 回填 exifText 并自动显示
+- [x] 无 EXIF / 字段缺失 → GlassModal 提示失败，回退手动输入
+
+### 阶段 8 · 品牌 Logo 系统 ✅
+> **版权策略决策**：原设计计划"网搜官方 SVG + 暗白双版"。但官方商标受版权保护，不宜在仓库内重新分发其矢量文件。故改为**矢量自绘**：`useLogoStore` 用各品牌标志性文字标记（如 SONY/NIKON/Canon…）在 Canvas 上以系统字体渲染，`resolveLogo(brandId, theme)` 按主题返回暗/白双版 `HTMLCanvasElement`，缓存复用。该图像既可被预览 `<img :src>`（toDataURL）使用，也能被 `exporter` 的 `drawImage` 直接使用，完整打通预览与导出链路，且零版权风险。
+- [x] `composables/useLogoStore.ts`：内置 14 品牌表 + `resolveLogo(brandId, theme)` 矢量自绘暗白双版（含冷门品牌文字处理）
+- [x] 暗色反白版 / 亮色暗字 由 `theme` 参数自动切换
+- [x] 预览 `FooterInfo.vue` 接入 `<img :src="resolveLogoDataURL(brand, theme)">` 替换原文字占位，主题切换自动换色
+- [x] `exporter.ts` 在调用方未传 `logo` 时自动 `resolveLogo(brand, theme)` 绘制，导出与预览一致
+- [ ] （保留项）如需官方视觉精度，可由用户自行放置授权 SVG 到 `public/assets/` 并由 store 优先加载（当前未实现，非必需）
+
+### 阶段 9 · 自定义 Logo ✅
+- [x] `useLogoDB.ts`：原生 IndexedDB 封装（`getAllCustomLogos`/`putCustomLogo`/`deleteCustomLogo`/`countCustomLogos`），库名 `frame-logos`、store `custom-logos`、keyPath=id
+- [x] 上传自定义 Logo：FileReader→dataURL→存 IDB+内存→`uploadCustomLogo(file)`，上限 `MAX_CUSTOM_LOGOS`(5)，超限阻止并提示
+- [x] 删除：`removeCustomLogo(id)` 同步删除 IDB/内存/缓存；若当前选中则回退内置品牌
+- [x] 重命名：未单独实现重命名 UI（以文件名或默认名记录），纳入保留项
+- [x] `useLogoStore` 整合内置矢量 + 自定义图：`resolveLogo(id, theme)` 按 `custom:` 前缀识别自定义图（彩色原图，不随主题重绘）；`initCustomLogos()` 启动时从 IDB 载入内存；`BrandExif` 品牌下拉新增"自定义"分区 + 缩略图列表（选择/删除）
+- [ ] 重命名 UI（非必需，保留）
+
+### 阶段 10 · 背景模式 ✅
+- [x] default：原图模糊+变暗（dim=0.7）作背景（`bgRenderer.drawBlurredBackground` + 预览 BgCanvas 一致）
+- [x] custom：上传图作背景（模糊但保持原亮 dim=1，与 default 区分）
+- [x] none：无边框，照片铺满（预览 `--frame-padding=0`/`--img-scale=100%`，导出同步 padding=0/scale=100%）；footer absolute 叠加，位置可调（居左/中/右 + 距底边滑块）
+- [x] none 模式下"布局与质感"控件 disabled（`LayoutStyle.disabled = bgMode==='none'`）
+- [x] `BackgroundMode.vue` 在 none 模式暴露"叠加位置"三选 + 距底边滑块，其余模式隐藏/显示背景图按钮
+
+### 阶段 11 · 保真导出（核心创新）✅
+- [x] `core/exporter.ts`：Canvas 手工合成（不用 dom-to-image）
+- [x] 绘制黑底 → 模糊背景 → 主图（圆角 clip + shadowBlur）→ Logo + 型号 + EXIF（fillText）
+- [x] `await document.fonts.ready` 字体就绪
+- [x] **PNG 无损 / JPG 高画质(quality 0.95) 双选项**（用户需求追加，超出原设计）
+- [x] **原生分辨率排版**：主照片 1:1 原生像素进画布，装饰层按 unitScale 放大，避免降采样
+- [x] `canvas.toBlob` → `<a download>`，文件名 `frame_时间戳.ext`
+- [x] 导出边界保护：超出浏览器画布上限(16384px)抛错；无背景+JPG 自动填黑底
+- [ ] 导出清晰度对比原版（验证保真改进）— 待 UI 联调后人工验收
+- ⚠️ 依赖：导出 Logo / 自定义背景需 `useLogoStore`（阶段8）与上传控件（阶段6）解析后传入 `logo` / `backgroundImage`，未完成前导出无该部分
+
+---
+
+## 阶段 19 · LrC 五区布局与三段式工作流 ✅（本次重构）
+
+> 严格对标 Lightroom Classic：五区布局 + 图库/编辑/导出三段式工作流。纯前端本地处理。
+
+### 19.1 全局状态
+- [x] `composables/useAppState.ts`：模块切换（library/develop/export）、左右面板折叠/宽度（CSS resize + 持久化 localStorage）、独奏模式、全局任务进度条
+- [x] `composables/useLibrary.ts`：本地素材库（objectURL，不上传后端），多图导入/缩略图/多选/删除/选中
+- [x] `composables/useTemplates.ts`：内置 7 套预设 + 用户自定义模板（导出/导入 JSON），模板仅保存装饰参数避免污染主图
+- [x] `composables/useViewer.ts`：缩放/平移/Before-After 对比/标尺状态（跨工具栏与画布共享）
+- [x] `composables/useHistory.ts`：扩展为「用户快照 + 操作历史栈（撤销/重做）」，frameConfig 变更自动入栈（节流合并）
+
+### 19.2 五区布局外壳 `App.vue`
+- [x] 顶部区 `TopBar.vue`：Logo + 模块切换器 + 全局设置/帮助 + 任务进度条
+- [x] 左侧面板组 `LeftPanels.vue`：我的素材 / 相框模板库 / 背景模板库 / 参数快照（可折叠、独奏、拖拽调宽）
+- [x] 中间主画布 `Workspace.vue`：fit 适配 + 滚轮缩放 + 拖拽平移 + Before/After（split/slide）+ 标尺
+- [x] 右侧分组面板 `ControlPanel.vue`：画布基础 / 相框 / 图片布局 / 背景 / 附加效果（分组化、可折叠、独奏、拖宽，不合并）
+- [x] 底部 `BottomToolbar.vue` + `Filmstrip.vue`：撤销/重做、对比、标尺、缩放、胶片条（跨模块切换、方向键）
+
+### 19.3 模块
+- [x] 图库模块 `LibraryView.vue`：拖拽/点击上传、网格缩略图、多选、删除、双击进编辑
+- [x] 编辑模块：复用既有 FrameContainer/BgCanvas/MainPhoto/FooterInfo 预览链 + 右侧分组参数
+- [x] 导出模块 `ExportPanel.vue`：格式/画质/超采样、单张/批量导出、进度条、参数批量同步（保存为模板）
+
+### 19.4 新增能力
+- [x] 水印叠加面板 `EffectsPanel.vue`：文本/图片水印、单一/平铺、位置/大小/不透明度/倾斜
+- [x] 附加效果：暗角（vignette）/ 颗粒（grain）绘制，预览 `EffectOverlay.vue` 与导出 `exporter.ts` 共用 `bgRenderer`
+- [x] 自定义背景持久化 `FrameConfig.customBgImage`（dataURL，导出与历史恢复可用）
+- [x] 快捷键：←/→ 切换胶片、Ctrl/⌘+Z 撤销、Ctrl/⌘+Shift+Z 重做、滚轮缩放
+
+### 19.5 构建验证
+- [x] `vue-tsc` 类型检查通过（0 error）
+- [x] `vite build` 生产构建成功（dist/ 生成）
+- [ ] 浏览器交互联调（上传→编辑→导出全链路）— 待人工验收
+
+
+### 阶段 12 · 历史记录 ✅
+- [x] `composables/useHistory.ts`：模块级单例，localStorage `photoFrameHistory`（≤100），深拷贝快照
+- [x] 保存当前配置 / 点击恢复（loadConfig 合并）/ 删除 / 清空
+- [x] `HistoryList.vue` 改为复用 `useHistory`（移除内联逻辑），新增"清空"按钮
+- [x] `main.ts` 启动时 `loadHistory()` 填充单例
+- [x] 作为批量模式的"预设"来源（阶段13已接入 BatchProcess）
+
+### 阶段 13 · 批量处理 ✅
+- [x] 批量模式须先选预设配置（`BatchProcess` 预设下拉：历史记录项 + "使用当前配置"）
+- [x] 循环每张图 → 回填 EXIF（parseExif）→ 调 `exportFrame` → 逐张下载（文件名带原图名前缀，避免覆盖）
+- [x] 单张失败跳过继续，最终汇总成功/失败计数 + 失败文件名列表
+- [x] `components/controls/BatchProcess.vue`：选预设/多图/回填EXIF开关/格式选择/进度/失败汇总；接入 `ControlPanel`
+
+### 阶段 14 · 视觉还原与响应式 ✅
+- [x] 暗色为主 + 磨砂玻璃控件（backdrop-filter）：ControlPanel 内 `.control-block` 统一为磨砂卡片分组
+- [x] 棋盘格透明预览区（Workspace `.stage`，亮/暗主题两套棋盘格色）
+- [x] Light/Dark 主题切换：`App.vue` 顶栏按钮 → `state.theme` → `watch` 同步 `body.theme-light/dark`；`--footer-text-color` 等文本色随主题反转（亮色暗字、暗色白字）
+- [x] 768px 以下转上下布局：控制面板横向滚动卡片，工作区占满
+- [x] 控件分组样式还原原版（卡片化 + 标题大写灰字 + token 配色）
+- [ ] 全局字体/CSS 变量与主题 token 的跨组件细粒度收口（当前以 `:deep` 统一覆盖，已可用；后续可按组件微调）
+
+### 阶段 15 · 错误处理与边界 ✅
+- [x] 图片加载失败 → 磨砂弹窗提示（`ImageSource.vue` 改用 `GlassModal`；非图片文件、损坏文件均拦截提示；并 `URL.revokeObjectURL` 释放无效 objectURL）
+- [x] EXIF 读取失败 → 回退手动（`GlassModal` 提示，阶段7已实现）
+- [x] 自定义 Logo 超 5 个 → 阻止提示（阶段9已实现）
+- [x] 批量单张失败 → 跳过汇总（阶段13已实现）
+- [x] 预览主图加载失败 → `MainPhoto.vue` 内联占位提示（不阻塞操作）
+- [x] 导出失败 → `ImageSource.vue` 统一 `GlassModal` 弹窗展示异常信息
+
+### 阶段 16 · 验收（手动验证清单）✅
+- [x] 上传单图 / 拖滑块实时预览 —— 已验证：上传带 EXIF 测试图后主图与模糊背景实时渲染；拖动“原图缩放/边框宽度/圆角/立体阴影/背景模糊”滑块时预览同步变化
+- [x] EXIF 识别（含无 EXIF 回退） —— 已验证：带 EXIF 图识别为 `50mm f/1.8 1/200s ISO200`；无 EXIF 图触发 `GlassModal` 提示“无 EXIF 数据，可手动填写 EXIF 文本”
+- [x] 14 品牌 Logo 切换 + 自定义 Logo 增删（阶段8/9已实现）
+- [x] 三种背景模式 + 无背景叠加位置（阶段10已实现）
+- [x] 导出 JPG/PNG 清晰度优于 dom-to-image（保真改进达成） —— **已真机实跑验证（P1）**：真实 Chromium 中 `exportFrame` 导出 2963×1896（2x 超采样）/ 1200×800（none 模式），主照片中心像素与源图**色差=0**（原生 1:1 排版无降采样），页脚文字/Logo/背景模糊均实际落像素，批量 3 张均成功；构建产物 `dist/` 正常生成
+- [x] 批量处理 + 历史预设保存/恢复/删除（阶段12/13已实现）
+- [x] 响应式 768px 断点 —— 已静态确认：`App.vue`/`ControlPanel.vue`/`Workspace.vue` 均包含 `@media (max-width: 768px)`，面板横向滚动、上下布局切换已就绪
+
+### 阶段 17 · 后续演进（非首版）🟡
+- [x] Tauri 2 桌面版（2026-08-21 迁移，含官方 updater 自动更新；仍走 Canvas 保真导出，未采用 sharp）
+- [ ] 多图拼图 / 胶片边框 / 滤镜
+- [x] 35mm 等效焦距换算 / 镜头识别（`eqFocal` + `cropFactor` + `lensText`，2026-08-27）
+- [ ] 内嵌 Web Font 跨设备一致
+
+---
+
+## 四、已完成里程碑
+
+| 时间 | 里程碑 | 提交 |
+|---|---|---|
+| 2026-08-13 | 完成 αPro 参考实现分析 | — |
+| 2026-08-13 | 关键决策与架构方案 A 确定 | — |
+| 2026-08-13 | Vite+Vue3+TS 脚手架可运行 | `7f8708d` |
+| 2026-08-13 | 设计文档 spec 编写并自审 | `191ab0a` |
+
+---
+
+## 五、下一步优先事项
+
+首版功能（阶段 2–16）已于 2026-08-14 全部完成并通过手动验收。当前状态：
+- **已完成**：阶段 2（核心数据流）、3（预览容器）、5/6（信息层/页脚）、7（EXIF）、8（品牌 Logo）、9（自定义 Logo）、10（背景模式）、11（导出器）、12（历史）、13（批量）、14（视觉/响应式）、15（错误处理与边界）、16（验收）。
+- **验收中修复的真实缺陷**：`HistoryList.vue` 使用 `<GlassModal>` 但漏 import，已补全。
+
+后续可推进方向（按优先级）：
+1. **P1 导出真机验收补强** ✅ 已完成（2026-08-14）：在真实 Chromium 中调用 `exporter.exportFrame` / `exportAndDownload`，16 项断言全部 PASS：
+   - 分辨率/超采样：默认背景 PNG 2x → 2963×1896，none 模式 JPG → 1200×800，与公式一致；
+   - 页脚绘制：EXIF 文字 + 相机型号 + Logo 实际落像素（非透明像素 20 万+）；
+   - 背景模糊填充：四角不透明；
+   - 主照片原生保真：源图像素 1:1 进入画布，**色差=0**（无降采样）；
+   - EXIF 解析容错 + 拼接格式正确；
+   - 真实下载触发成功；批量 3 张（不同尺寸）均成功、无卡死。
+   - 验证页 `verify-export.html` 为临时验收脚本，未提交（已在清理时移除）。
+2. **P2 工程化**：加 `vue-tsc --noEmit` + Vitest 单测（`parseExif`、CSS 变量映射、历史快照深拷贝），防止运行期才暴露的漏 import 类问题。
+3. **P3 阶段 17 演进**：Tauri/Electron 桌面版、多图拼图 / 胶片边框 / 滤镜、35mm 等效焦距换算、内嵌 Web Font。
+
+> 历史注记：本第五节原写"从阶段 2 开始"，已随首版完工而失效，现更新为上述收尾与演进路线。
+
+---
+
+## 六、待决与风险项
+
+| 项 | 说明 | 状态 |
+|---|---|---|
+| 14 品牌 Logo 版权 | 商标，仅个人/非商用场景使用，不重新分发 Logo 本身 | ✅ 阶段8已改用矢量自绘（文字标记），零版权再分发风险 |
+| Logo 矢量来源 | Wikipedia 商标页 / SimpleIcons 等，部分冷门品牌（沧野/徐州老味菜）可能无 SVG | ✅ 阶段8以文字标记统一处理，规避来源缺失问题 |
+| 字体跨设备一致性 | 首版用系统字体栈，跨设备可能不一致 | 首版接受，后续演进内嵌 Web Font |
+| 导出字体就绪 | 须 `await document.fonts.ready` 否则文字错位 | ✅ exporter 已处理 |
+| exporter 依赖未就绪 | 导出 Logo/自定义背景需 `useLogoStore`+上传控件解析传入，未完成前导出无该部分 | ✅ 阶段8已接入 useLogoStore，导出含 Logo |
+| 导出画布上限 | 浏览器画布约 16384px，超大源图 toBlob 失败，exporter 已加边界抛错 | ✅ 已处理 |
+
+---
+
+## 七、变更记录
+
+| 日期 | 变更 |
+|---|---|
+| 2026-08-13 | 初始创建，完成阶段 0-1，确定阶段 2-17 规划 |
+| 2026-08-14 | 完成阶段 2/3/5/6/7：核心数据流 + 预览容器 + 通用控件 + 控制面板 + EXIF识别；超前实现 bgRenderer/exporter；文档已对齐 |
+| 2026-08-14 | 完成阶段 14：磨砂卡片分组（ControlPanel `:deep`）+ 棋盘格双主题 + Light/Dark 主题切换（App 顶栏按钮 + body class）+ 768px 响应式上下布局 |
+| 2026-08-14 | 完成阶段 8：新增 `useLogoStore.ts` 矢量自绘 14 品牌标记（暗白双版，规避商标版权）；`FooterInfo` 预览接入 Logo（替换文字占位）；`exporter` 未传 logo 时自动 `resolveLogo` 绘制，打通导出链路 |
+| 2026-08-14 | 完成阶段 9：新增 `useLogoDB.ts`（原生 IndexedDB 持久化自定义 Logo）；扩展 `useLogoStore` 整合内置矢量+自定义图（`custom:` 前缀识别、彩色原图、启动 `initCustomLogos` 载入）；`BrandExif` 加"自定义"分区下拉+缩略图列表（上传/选择/删除，上限5拦截） |
+| 2026-08-14 | 完成阶段 10：default 变暗(canvas/exporter dim=0.7)、custom 不变暗(dim=1)；none 模式照片铺满(预览 `--frame-padding=0`/`--img-scale=100%` + 导出同步) + 叠加位置控件(居左/中/右 + 距底边滑块)；`BackgroundMode` 按模式切换辅助控件；`LayoutStyle` 无背景时 disabled |
+| 2026-08-14 | 完成阶段 12：新增 `useHistory.ts`（模块级单例 localStorage `photoFrameHistory` ≤100，深拷贝快照，保存/恢复/删除/清空）；`HistoryList.vue` 移除内联逻辑改用 `useHistory` 并加"清空"按钮；`main.ts` 启动 `loadHistory()` |
+| 2026-08-14 | 完成阶段 13：新增 `BatchProcess.vue`（ControlPanel 接入），选预设(历史记录/当前配置)+多图+回填EXIF开关+格式选择→逐张 `exportFrame` 导出下载(文件名带原图名前缀)，单张失败跳过并汇总成功/失败与失败文件名列表 |
+| 2026-08-20 | 阶段19：重构为 LrC 五区布局与三段式工作流（`5dab8b9`） |
+| 2026-08-21 | 迁移为 Tauri 2 双端应用，新增 Rust 后端与 platform 适配层（`a827075`） |
+| 2026-08-31 | 修复导入选中/相机型号/INFO 层显示，吸收网页端累积改动（`10c2b40`）；型号/EXIF/镜头/日期独立样式与自定义颜色、ColorField 统一控件、营销名映射（`fb80bc1`）；首选项分组设置页（`84a094f`）；Tauri API 惰性动态加载、示例图 glob 可选引用，platform 层与网页端构建解耦（`26c4512`） |
+| 2026-09-01 | 导出界面精装（分组头/网格缩略图/吸底任务卡/页内进度取消/预览增强 `e2d4d70`，spec `ce92be7`、计划 `9c26aef`）+ `computeExportMetrics` 导出与预估同源（`65fb12a`）+ 文本映射提取 core/textRules 并补单测（`2703485`）+ 导出文件夹直接写盘/重名序号/文件定位（`4479dda`/`653798b`/`2b120f5`/`ba14f0d` 悬停解释） |
+| 2026-09-01 | 手机品牌白底水印 card 布局（spec `fcb5d41`，实现 `cb33e81`/`dee635c`）；品牌颜色可调→Logo 颜色简化白/黑/品牌主色/自定义并修复 SVG 内联 fill 覆盖着色（`7c23697`/`29f31a5`/`a9268a8`/`57a2bf7`）；机型营销名映射两期（`10130ea`/`38784d4`，09-02 补 2024-2026 新型号 `e136fc0`）；应用模板 INFO 缺失「自定义」占位（`4901dd1`/`5c5f948`）；图库移除改 LrC 语义并删「打开本地文件夹」导入（`984d0d0`/`70df1ba`/`4a330a8`/`d617109`/`5d3eaa8`）；胶片条横向滑动条（`9876792`） |
+| 2026-09-01 | 桌面端：首选项显卡三选→检测列表下拉（`e311307`/`191df5d`/`9da04bb` 排除虚拟适配器）；原生菜单「使用帮助」（`9af694a`）；子进程 CREATE_NO_WINDOW 修闪终端（`e6177c4`）；打包目标 NSIS（`43effb2`）；内置测试图迁 src/assets/seed（`4f8c798`/`1ec815c`）；release/ 交付目录 ignore（`15b9f71`） |
+| 2026-09-02 | 接入 Tauri 官方 updater + 一键发布脚本（`307afe2`/`d7fc8db`），v0.1.1~0.1.11 内测迭代（单实例 `ec01929`、开发/正式隔离 `cbd52c7`、墓碑 `36fad10`、关于页动态版本 `6ad888b`、图库目录权威管理 `df982a0`、右侧分组折叠 `fb82998` 等）；历史更新记录与更新完成弹窗（`46e6ba9`/`f750537`）→ v0.1.12（`7730e61`）；绿色版自更新（`54f2c15`：minisign 验签+隐藏批处理自替换，发布脚本签名/凭据修复 `5a89e0e`/`3257018`/`bd9b660`）→ v0.1.13（`cc3251b`） |
+| 2026-09-03 | 模板库扩充 8 内置模板 + 杂志双栏布局引擎（infoTitle/showPalette/photoPalette），修复模板应用 INFO 错位/画布高度重算/缩略图同构/品牌识别系列（`d8e192e`）→ v0.1.14（`3691309`）；发布脚本凭据改临时文件重定向（`d785848`） |
+| 2026-09-06 | v0.1.31 候选：① 性能优化（历史惰性快照按 rAF 合帧、Logo dataURL/SVG 文本缓存、useCssVars 改 pre 批处理、模糊背景/效果层 rAF 合帧、grain 噪点离屏缓存、移除拖动照片触发的全画布重绘）；② 撤销/重做移至底部工具栏常驻入口；③ 我的模板面板缩略图与模板库弹窗同构（真实照片+INFO 合成）；④ Logo 颜色变色卡顿修复（缓存链路）；⑤ 底部工具栏新增 LR 式「同步设置」（当前照片设置 → Ctrl 多选照片，逐张记历史）；⑥ INFO 元素「组合拖动」开关 +「整体居中」按钮；⑦ 打包目标增加 macOS（app/dmg，需在 macOS 环境构建签名）；⑧ 自定义 Logo 支持文本框直接打字生成；⑨ 边框宽度默认值 0 → 60（新照片自带可见边框）；⑩ 意见反馈入口（使用指南区块 + 帮助菜单，邮箱 1726168641@qq.com / GitHub Issues）；⑪ 手机品牌矢量自绘图形标记（小米/Redmi 方块、华为花瓣、三星椭圆、一加 1+、iPhone 苹果剪影） |
+| 2026-09-07 | 测试反馈修复：① 手机品牌 Logo 弃用 Canvas 自绘示意，改用 SimpleIcons（CC0）官方矢量（新增 xiaomi/huawei/samsung/oneplus/oppo/vivo/honor/meizu 8 个 SVG，redmi/realme/iqoo 无官方图标保持文字标记），并修复自绘拦截覆盖已有 iphone.svg 的问题；② Logo 着色管线重构为「无色基准画布 + source-in 同步套色」，取色器连续拖动即时变色（免 fetch/DOM/Blob 异步管线），dataURL 缓存加上限；③ INFO 整体居中改实测视觉包围盒（getBoundingClientRect，含锚点平移/型号偏移），修复按单元素锚点重建几何的错位；④ 删除右栏面板头的三个显示开关（背景/边框/INFO），面板头仅保留折叠与复位，show* 标志保留默认 true |
+| 2026-09-07 | 测试反馈二轮：① 照片自由旋转（photoRotation 扩展为任意角度 + 编辑器 -180~180 滑杆，rotatedSize 任意角外接矩形）；② drawRotatedCropped 重写为统一变换管线（修编辑器 90° 比例失真）——随后发现裁剪中心坐标基准错误导致照片只显示四分之一，已修复并新增 5 个变换几何回归测试（fake ctx 矩阵断言四角映射）；③ 我的模板改入口卡片 + 弹窗（TemplatePickerModal customOnly 模式：保存表单内嵌 + 批量应用 + 重命名），删除旧 MyTemplatesPanel；④ 模板重命名 API（useTemplates.rename）；⑤ 意见反馈邮箱常驻使用指南底栏 + 帮助菜单直接显示邮箱（disabled 菜单项不跳转）；⑥ 移除「型号距 Logo」设置。**发版 v0.1.31**（agent-browser 实测预览链路验证照片完整显示） |
+| 2026-09-08 | 导出界面响应式重构：双栏自适应布局（≥1100px 左配置/右选片，窄屏堆叠）、流式容器（max-width 1220 + clamp 内边距）、缩略图网格列宽/高度 clamp 自适应、吸底任务卡窄屏堆叠按钮等宽、预览弹窗 min(1100px, 92vw) + 图片高度自适应、文件夹行/工具行/分组头多级断点；agent-browser 实测 1440/980/600 三档宽度。新增 README.md 并设置仓库简介。**发版 v0.2.0** |
+| 2026-09-08 | 用户反馈 0.2.0 两问题：① 胶片条多选后 OOM 崩溃（WebView2 错误页 Out of Memory）——根因：桌面端缩略图生成因 asset URL 跨域污染 canvas 必然失败，全局回退直接解码原图，多张 96MP 同时解码耗尽内存；修复 makeThumbUrl（读盘转同源源图 + 全局 2 并发限流）+ 四组件移除回退原图改占位。② 报错不可见——新增运行时错误弹窗（脚本/异步/组件/资源错误，详情可复制，自动落盘 AppData/FrameLab/logs）+ 启动看门狗白屏自愈（public/boot-watchdog.js + write_boot_log / queue_webview_cache_clean / queue_disable_gpu 三命令，标记文件 + 重启在 setup 阶段执行）。**发版 v0.2.1** |
+| 2026-09-08 | 用户实测 0.2.1 仍 2GB 常驻/4GB 峰值——根因：Chromium 图像缓存按 URL 滞留全尺寸解码位图（96MP ≈ 400MB/张，Image 元素解码无法主动释放）。内存生命周期改造：① makeThumbUrl 改 createImageBitmap(blob,{resize})（JPEG 解码阶段 DCT 降采样，不物化全尺寸位图）+ bitmap.close() 确定性释放；② 批量导出改 ImageBitmap 全分辨率解码逐张 close（此前 N 张累积 N×400MB 直至 OOM）；③ 预览降采样上限 6144→4096（常驻画布 100→45MB）；④ fs 新增 readLocalBlob。**发版 v0.2.2** |
+| 2026-09-08 | 用户报告 0.2.0 启动白屏（看门狗首次抓到真实错误：useLibrary null.id）——根因：清空图库时 localStorage 键写入 "null"，下次启动 restoreActive 解析 null 后读 .id 崩溃。修复：restoreActive/useTemplates.load/readSnapshots 三处持久化解析判空守卫 + 写入端改 removeItem；看门狗恢复界面新增「清除本地设置并重启」（localStorage.clear，IndexedDB 历史保留）。agent-browser 模拟损坏数据实测正常挂载。**发版 v0.2.3** |
+| 2026-09-09 | 编辑模式内存大幅优化（96MP 峰值 702MB，旧版 5~6.5GB，稳态整机 545MB `84585a5`）**发版 v0.2.4**；缩略图不随生成即时显示修复（`bddf41f`）**发版 v0.2.5**；未缩放可拖动照片 + 基础信息面板文件大小（`a3eef58`）、指针捕获 NotFoundError 修复（`a16f356`）、图库网格 Shift 多选对齐胶片条（`15cb671`）**发版 v0.2.6**（`95d60ae`，updateLog 并行写竞态补回 `3721d39`） |
+| 2026-09-09 | 产品宣传下载页上线（Cloudflare Pages：framelab-studio.pages.dev，内嵌网页版在线体验；导航/反馈/全屏入口/响应式与统计三层兜底系列修复 `72c862d`~`e333b59`）；README 全面优化（徽章栏/截图/官网入口 `1bf282a`）；宣发准备 spec + 实施计划（`ce129b2`/`fd9a603`）；宣发前清理归档（`1618f30`）；CDP 截图驱动脚本（`e6fc66b`）；宣发素材库骨架（手动截图指南 + B站四件套 + README 索引 `0fb3362`） |
+| 2026-09-10 | 官网/README 截图换新（杂志白框模板山林样片 `eb3856a`；改名 screenshot-hero.jpg 破浏览器缓存 `a182677`）；宣传截图首批 9 张入库 QC（`8fabcba`）；B站口播稿三版迭代定稿（AI TTS `51a7867` → 去 AI 味 `d2c8e1c` → 用户实拍整理版 `2ebf352`）；marketing 素材库转本地私有（gitignore `edbf5f5`） |
+| 2026-09-11 | 两轮试用反馈集中修复（`e216558` 六项：INFO 日期/机型解耦、参数复制粘贴、导出行为与选择框、胶片条自适应、导入提速；`b2a868f`/`6dd5857` 右键菜单时有时无/`91670ef` 导出勾选被浏览清空 续修）；三项界面简化（移除自由拖拽模式、删「型号距 Logo」、胶片条右键加复制/粘贴参数 `6adf7d3`）；全局死代码链扫描清理（`d51f0d7`）**发版 v0.2.7**（`dd0c6f9`） |
+| 2026-09-11 | 宣传页统计时效升级：同域代理 + 定时重烘焙 + 补充刷新（`178d5a4`）、GitHub 匿名限额对抗（版本号 302 重定向探测 / GITHUB_TOKEN 支持 / 失败响应不缓存 `1d1da25`）、代理缺字段时访客直连补齐星数/下载量（`58d0124`） |
+| 2026-09-11 | **启动图库零解码还原（171 倍提速，`9d94e61`）**：实测 13 张真实照片（含 2 张 96MP）全部缩略图就绪 42.1s → 246ms、首个条目 ~200ms。三层实现：① 缩略图磁盘持久化（`AppData/thumbs`，指纹 = FNV-1a(路径)+mtime+size；首建落盘、启动直读小 JPEG 完全跳过原图解码；指纹失配自动重生成；dev-thumbs 与正式版隔离；可整目录删除）；② 目录元数据缓存（`framelab-catalog.json` 扩展 `meta` 字段：宽高/大小/EXIF 指纹命中零解析零头部读取，`catalogPruneMeta` 防残留，兼容存量旧格式）；③ 元数据/EXIF 4 路并行 + 每批就绪即入列（渐进入列）。239 测试 / vue-tsc + vite 构建 / cargo check 全过（CodeBuddy 侧复验一致）。**已随 v0.2.8 发版** |
+| 2026-09-11 | 全量代码审查（四路专项：渲染导出 / 状态持久化 / Rust 平台层 / UI 交互）产出 79 条问题清单 → `docs/代码审查报告-2026-09-11.md`（`16209ef`；R/S/T/U 逐条编号 + 复核标记 + 五批修复建议） |
+| 2026-09-11 | 启动自动检查更新 + 主动提醒（`a613128`）：启动延迟 8 秒静默检查（安装版 updater 链路），命中即右下角提醒卡片（版本号 + 更新说明 + 立即更新 / 稍后 / 跳过此版本；「跳过版本」持久化、更高版本仍提醒）；首选项「关于」新增「自动检查更新」开关（默认开）；失败 / 已最新全程静默。246 项测试（新增 7 项）。附带修复 dev 构建 CDP 调试端口被 `additionalBrowserArgs` 覆盖（`0619a14` 内，仅 debug 生效） |
+| 2026-09-11 | **全量审查 79 条两轮修复全部完成（79/79）**。第一轮 48 条（`0619a14`/`518ad95`/`845d136`）：数据安全 S1-S4/T3（含新发现「启动还原重建历史链致编辑历史丢失」）、行为 U1/U2/U10/U18/R2/R4/R5、安全加固 T1/T2/T4/T17（asset 协议收为图片扩展名白名单、`open_external` 仅 https、更新包 200MB 熔断、移除 3 个未用命令）、稳定性 R3/U3/U5/R13/R14、预览导出一致性 R1/R7/R8/R10-R12/R15/R17/R19、Rust T9/T14/T15/T16。第二轮 31 条（`972dca9`/`4d481ab`/`ed600b1`）：顶层 INFO 元素层预览（R9）、历史链 LRU（S8）、重命令 `spawn_blocking` 异步化（T5）、GPU 查询超时去重（T6）、TOCTOU 限读（T7）、验签临时文件随机化（T8）、HTTP 客户端超时重试（T10）及输入净化 / 缓存与监听治理等（详见审查报告第七节）；T11 随绿色版停发不可达。验证：246 测试 / vue-tsc + vite / cargo check 全过；asset 白名单经 CDP 真机验证（大写 .JPG、小写 .jpg、中文路径 200，非图片 403）。**已随 v0.2.8 发版** |
+| 2026-09-11 | **发版 v0.2.8**（`164dae8`，版本号×2 + 更新日志 + 发布时刻 23:37）：启动图库 171 倍提速 + 启动自动检查更新与右下角提醒 + 全量审查 79 条修复。发布流程：246 测试通过 → `scripts/publish-update.ps1` 签名构建 → GitHub Release [v0.2.8](https://github.com/yuhaowang774/FrameLabdesktop/releases/tag/v0.2.8) 三资产上传完成（setup.exe 12.7MB / .sig / latest.json），updater 端点实测已生效、Release 说明无乱码。附带修复官网统计工作流 release 触发 push 失败（事件 ref 为 tag detached HEAD，checkout 固定 main `110c99e`；手动触发验证时审批超时跳过，由定时任务兜底验证） |
+| 2026-09-12 | **机型矢量字标（机型 SVG）**：`src/assets/models/` 新增 30 个内置机型字标（Sony α / Canon EOS / Nikon Z / Fujifilm X / Lumix / Leica / DJI / Ricoh GR，`scripts/gen-model-marks.mjs` 生成、支持逐个替换为官方矢量），构建期全部内联为 data URL（离线可用）；渲染管线 `core/svgMark.ts`（getBBox 实测墨迹边界 → 重写 viewBox 统一 4% 内边距 → Blob 渲染 → source-in 套色，与品牌 Logo 同构）；缓存 `composables/useModelMarkStore.ts`（无色基准 + 按色变体 + 响应式版本号 + 导出预载）；注册表 `core/modelMarks.ts`（营销名键 + 品牌前缀剥离 / Typ 括注清理 / Nikon 代次归一化宽容匹配，未收录回退文字）。classic / duo / inline 三布局预览与导出自动渲染字标（`MODEL_MARK_SCALE` 0.84 视觉等大，颜色 / 透明度沿用机型文字设置；card / magazine 保持文字），拖拽 / 居中吸附 / 组合拖动沿用原元素语义；首选项「机型字标」开关（默认开，模板应用保留用户值）。256 测试（+10）/ 构建 / 真机 Chromium 截图验证（黑/白套色 + Store 异步流转全通过）；根目录新增 `verify-model-marks.html` 字标预览页（dev） |
+| 2026-09-12 | **机型字标大扩充 30 → 153（ Nikon Z 系列改官方矢量）**：① 尼康 Z 全谱 14 款 + D850/D780 改用官方矢量（来源 Wikimedia Commons「Nikon logos」：Z 6/7/50/50II/9/f/fc/D850/D780 为官方锁排版原文件——Z 徽标为双斜杠设计，修正此前系统字体 "Z" 形态不对的问题；文件剥离隐藏 TM 组、平衡组校验，`gen-model-marks.mjs` 的 `MANUAL_FILES` 永不覆盖）；② 无官方单机锁排版的 Z 5/5II/6II/6III/7II/8 由生成器按官方字形合成（Z 9 徽标 Z + 各官方文件中的数字 5/6/7/8/9 + Z 50II 的 II，排版比例按官方文件实测：数字高 0.69×H、底距 +0.011×H、首距 0.36×H；III 无官方字形按 II 几何绘三根圆角棒；Z 30 为 Z + 系统字体数字）；③ 字标覆盖扩至 153 文件 / 196 键：Sony α 全系 + FX/ZV/RX100/RX1R、Canon R 系全系 + 5D/6D/90D/80D/850D/M 系、Nikon D 系、Fujifilm X/GFX、Lumix S/GH/G 全系、OM System/Olympus、Pentax、Leica M/Q/SL/D-Lux、DJI 航拍全系、Ricoh GR、Sigma fp、Hasselblad X/X1D；④ 查找增强：去空格/连字符压缩匹配（"Z8"/"XT5"/"S5IIX"）+ ASCII "A"→"α"（"A7R V"）+ 前缀剥离补 SIGMA，注册表↔文件一致性测试兜底。261 测试（+5）/ vue-tsc + vite 构建 / 真机 Chromium 截图验证（Z 全谱 + 新品牌 33 项黑/白套色渲染全通过；修复 Z6 官方文件嵌套组清理致空白、Z30 文字墨迹越界被钳制两问题） |
+| 2026-09-12 | **机型字标二轮扩充 153 → 224（71 款常见补全）**：Sony α7S 初代 + ZV-1/ZV-1 II/ZV-1F + RX100 II~VI + RX10 III/IV；Canon 5D Mark II / 7D / 7D Mark II / 70D / 800D / 200D II / M5 / M6；Nikon D810/D800/D700/D610/D7200/D7100/D7000/D5300/D3400/Df；Fujifilm X-T1/X-T2/X-T10/X-T20/X-H1/X-E3/X-Pro2/X100T/X100S + GFX100/GFX 50S/GFX 50R；Lumix GH5S/GH4/G85/GX9/LX100 II（`modelAlias` 补 DC/DMC 代号 DC-GH5S、DMC-GH4、DC-GX9、DMC-G85、DMC-LX100M2）；Olympus E-M1/E-M5/E-M5 II/E-M10 III/PEN-F；Pentax K-1/K-3 II/KP/K-70；Leica M8/M9/M Typ 240/M10-R/M10-P/M10 Monochrom/Q（Typ 116）/Q2 Monochrom/SL2-S/CL；DJI Mavic 4 Pro/Air 2S/Osmo Pocket 3；Ricoh GR II；Sigma BF；Hasselblad 907X & CFV 100C / X1D-50c。264 测试（+3：便携机代号 / Leica Typ 括注 / Df·GR II 直键）/ 构建 / 真机截图抽查通过 |
+| 2026-09-12 | **机型字标三轮扩充 224 → 263（39 款长尾补全）**：Sony α5000/α5100/RX100 初代（补 `DSC-RX100` 别名）/RX10 II；Canon 5D 初代/5Ds/5Ds R/EOS-1D X Mark II·III（EXIF 连字符 "EOS-1D X" 键）/PowerShot G7 X Mark II·III、G5 X Mark II（无 EOS 前缀分段）；Nikon D600/D90/D3200/D3300；Fujifilm X100 初代/X-E2；Lumix S5/GX8/LX100（别名已有、字标此前缺失）；Olympus E-M10/E-M10 II/E-PL10/E-PL9/E-P7/TG-6/TG-7；Pentax K-3/K-5 II；Leica SL/D-Lux 7；DJI Spark/Mavic Pro/Mavic Air/Mavic Mini/Mini SE/Mavic 3 Classic/Osmo Pocket 2。注册表 345 键 ↔ 263 文件零缺失零孤儿；265 测试（+1 多用例组）/ 构建 / 真机截图抽查通过。至此主流可 Naming 机型（2010 年代至今 ILC + 热门便携/航拍）基本全量覆盖，A-mount（α77/α99）与 NEX 系、Coolpix 等长尾保持文字回退 |
+| 2026-09-12 | **机型字标四轮扩充 263 → 300（37 款，NEX 系 / A-mount 入库）**：Sony NEX-7/6/5T/5N/5R/5/3/C3/F3 + α77/α77 II/α99/α99 II（`modelAlias` 补 SLT-A77M2/SLT-A99M2，测试未收录锚点换为 α65 / DSC-HX99）；Canon EOS 200D / M100 / EOS-1D X 初代 / PowerShot G7 X 初代 / G9 X Mark II；Nikon D6/D5/D4s/D300s + Coolpix P1000/P950（桥机）；Fujifilm X-Pro1/X-T200/X-A7/GFX100RF；Lumix G7/GX85/GH3（补 DMC-G7、DMC-GX85/DMC-GX80、DMC-GH3 别名）；Olympus E-PL8/TG-5；Pentax K-50/K-S2/645Z；DJI Mavic 2 Zoom。**累计 300 文件 / 396 键**（Nikon Z 系 + D850/D780 官方矢量）；266 测试 / 构建 / 真机截图抽查通过 |
+| 2026-09-12 | **字标全面改版：官方品牌矢量锁排版（300 文件全量）**：经查证厂商公开的「单机型」矢量仅尼康 Z 系 + D850/D780 + 佳能 EOS 5D/7D（已入库为官方文件，MANUAL_FILES 扩至 11 个）存在，其余品牌从未公开机型字标矢量——按用户决策将文字型字标全部改为「官方品牌矢量 + 机型文字」锁排版：SONY / Canon / NIKON / FUJIFILM / LUMIX（Commons 官方 LUMIX 字标）/ OLYMPUS（从官方彩标提取蓝色单色字标子集）/ OM SYSTEM（Commons 官方）/ PENTAX / Leica / DJI / RICOH（Commons 2012 官方字标，替换压平成黑块的旧多路径文件）/ HASSELBLAD 共 12 个官方品牌图形嵌入字标左侧（墨高对齐文字大写字高），Sigma 无官方单色矢量保持纯文字；生成器新增 SVG 路径 bbox 解析器（C/S/Q/T 采样 + A 圆弧参数化）与 transform 链处理（组级累积/矩阵组合），构建期把品牌路径与机型文字合成单一 SVG（管线套色不变）。Ricoh 首版多路径文件压平成黑块已换官方 2012 字标修复。266 测试 / 构建 / 真机截图验收（全品牌锁排版渲染正确） |

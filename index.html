@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23111'/><rect x='4' y='4' width='8' height='8' rx='2' fill='%23fff'/></svg>" />
+    <title>水印小屋</title>
+    <meta name="author" content="fengnan" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- 启动看门狗：普通脚本先于模块执行，捕获启动错误并在白屏时渲染恢复界面 -->
+    <script src="./boot-watchdog.js"></script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

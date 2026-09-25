@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>水印小屋 — 免费下载</title>
+  <meta name="description" content="水印小屋 为照片加上品牌 Logo、相机型号、拍摄参数与日期，内置杂志排版模板与模糊背景，所见即所得、按原始像素无损输出。本地处理不上传，免费下载，支持 Windows 10/11。">
+  <meta name="keywords" content="水印小屋,照片相框,EXIF,信息卡,水印,摄影后期,照片排版,免费下载,Windows">
+  <meta name="author" content="fengnan">
+  <meta name="theme-color" content="#05070d">
+  <link rel="canonical" href="https://github.com/xiangyizhang-hue/watermark-house">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="水印小屋">
+  <meta property="og:title" content="水印小屋 — 免费下载">
+  <meta property="og:description" content="为照片加上品牌 Logo、相机参数与日期，所见即所得、按原始像素无损输出。本地处理不上传，免费下载。">
+  <meta property="og:url" content="https://github.com/xiangyizhang-hue/watermark-house">
+  <meta property="og:locale" content="zh_CN">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="水印小屋 — 免费下载">
+  <meta name="twitter:description" content="为照片加上品牌 Logo、相机参数与日期，原始像素无损输出，本地处理不上传。">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "水印小屋",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Android 12+, Windows 10, Windows 11",
+    "softwareVersion": "0.3.8",
+    "datePublished": "2026-09-25",
+    "description": "为照片加上品牌 Logo、相机型号、拍摄参数与日期合成，杂志排版模板，原始像素无损输出，本地处理不上传。",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+    "downloadUrl": "https://github.com/xiangyizhang-hue/watermark-house/releases/latest",
+    "author": { "@type": "Person", "name": "风喃", "alternateName": "fengnan" },
+    "url": "https://github.com/xiangyizhang-hue/watermark-house"
+  }
+  </script>
+
+  <link rel="stylesheet" href="assets/styles.css">
+  <script src="assets/particles-bg.js" defer></script>
+  <!-- 构建时生成（scripts/fetch-gh-stats.mjs）：统计兜底值，须先于 main.js 执行 -->
+  <script src="assets/gh-stats.js"></script>
+  <script src="assets/main.js" defer></script>
+</head>
+<body>
+  <!-- 瓦肯三角粒子交互背景（内容层之下，不拦截点击） -->
+  <canvas id="bgParticles" aria-hidden="true"></canvas>
+
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <!-- ======================== 导航 ======================== -->
+  <header class="site-header" id="siteHeader">
+    <nav class="nav container" aria-label="主导航">
+      <a class="brand" href="#top" aria-label="水印小屋 首页">
+        <img class="brand-mark" src="assets/icon.png" alt="" width="34" height="34">
+        <span class="brand-name">水印小屋</span>
+        <span class="brand-pill">照片相框工具</span>
+      </a>
+      <div class="nav-right">
+        <a class="nav-link" href="https://github.com/xiangyizhang-hue/watermark-house/releases/latest" target="_blank" rel="noopener" data-track="download-nav">下载</a>
+        <a class="nav-link" href="https://github.com/xiangyizhang-hue/watermark-house" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <!-- ======================== Hero ======================== -->
+    <section class="hero" id="top">
+      <div class="container hero-grid">
+        <div class="hero-copy reveal">
+          <h1 class="hero-title">开源免费<br>水印小屋</h1>
+          <p class="hero-sub">
+            给照片挂品牌 Logo 和 EXIF 参数的本地小工具。杂志模板，无损输出，照片不出你的电脑。
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-lg" id="heroDownload"
+               href="https://github.com/xiangyizhang-hue/watermark-house/releases/latest"
+               target="_blank" rel="noopener" data-track="download-hero">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              立即下载
+            </a>
+            <a class="btn btn-ghost btn-lg" href="https://github.com/xiangyizhang-hue/watermark-house" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.34 1.12 2.91.86.09-.67.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.36 9.36 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.02 10.02 0 0 0 22 12.25C22 6.58 17.52 2 12 2z"/></svg>
+              查看 GitHub
+              <span class="star-chip" id="starChip" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.1-5.9 3.1 1.2-6.5L2.5 9.4l6.6-.9z"/></svg><span id="starCount">—</span></span>
+            </a>
+          </div>
+          <p class="dl-stat">
+            <strong id="dlTotal" title="数据来自 GitHub Releases 实时统计">—</strong>
+            <span>累计安装包下载</span>
+            <span class="dl-ver" id="verPill">v0.3.8</span>
+          </p>
+          <p class="hero-platforms">
+            Windows 10 / 11 x64 <span class="dot">·</span> 离线可用 <span class="dot">·</span> 支持更新
+          </p>
+        </div>
+
+        <!-- 网页版在线体验：桌面端完整界面按 1280×800 渲染后缩放呈现，如同开了一个真实窗口 -->
+        <figure class="app-shot">
+          <div class="app-window">
+            <a class="try-fullscreen" href="app/?window=1" target="_blank" rel="noopener" title="全屏体验（新窗口打开）" aria-label="全屏体验（新窗口打开）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>
+            </a>
+            <iframe class="app-embed" id="appEmbed" src="app/?window=1" title="水印小屋 网页版完整界面（与桌面端一致），可直接操作体验" loading="lazy"></iframe>
+            <img class="app-shot-img" src="assets/screenshot-hero.jpg" alt="水印小屋 应用界面截图：杂志白框模板加载山林样片，信息带显示 SONY α6000、镜头型号与拍摄参数" width="1920" height="1201" loading="lazy" decoding="async">
+          </div>
+        </figure>
+      </div>
+    </section>
+  </main>
+
+  <!-- ======================== 页脚 ======================== -->
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div class="footer-left">
+        <p class="footer-copy">
+        © <span id="year">2026</span> 水印小屋
+          <!-- 备案后替换： <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">X ICP 备 XXXXXXXX 号</a> -->
+        </p>
+        <p class="footer-note">
+          水印小屋 为独立的本地照片处理工具，与页面中提及的各相机 / 手机品牌无隶属关系；
+          品牌字标版权归各品牌所有，仅用于标识用户自己的拍摄器材。
+        </p>
+      </div>
+      <nav class="footer-links" aria-label="页脚导航">
+        <a href="https://github.com/xiangyizhang-hue/watermark-house/releases/latest" target="_blank" rel="noopener" data-track="download-footer">下载</a>
+        <a href="https://github.com/xiangyizhang-hue/watermark-house" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/xiangyizhang-hue/watermark-house#readme" target="_blank" rel="noopener">使用指南</a>
+        <a href="https://github.com/xiangyizhang-hue/watermark-house/issues" target="_blank" rel="noopener" data-track="feedback-issue">反馈</a>
+        <span>作者：风喃 / fengnan</span>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>

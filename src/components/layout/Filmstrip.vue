@@ -1,0 +1,364 @@
+<script setup lang="ts">
+// 底部胶片窗格 Filmstrip：跨模块缩略图，点击切换/进入编辑。
+// 支持顶部拖拽调整高度（上推增高），高度/可见性由 useAppState 统一管理。
+// 滚动：显示横向滑动条（覆盖全局隐藏滚动条），鼠标滚轮横滚，切换照片自动跟随当前项。
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
+import { useLibrary } from '../../composables/useLibrary'
+import { useAppState } from '../../composables/useAppState'
+import { useParamClipboard } from '../../composables/useParamClipboard'
+import GlassModal from '../common/GlassModal.vue'
+
+const library = useLibrary()
+const app = useAppState()
+const trackEl = ref<HTMLElement | null>(null)
+
+// 点击交互：
+//  - 普通点击：切换主图（不动勾选集合，图库模块下进入编辑）
+//  - Ctrl/⌘+点击：切换选中状态（不切换主图、不跳转模块）
+//  - Shift+点击：从锚点到目标项范围多选
+function onItem(id: string, e: MouseEvent) {
+  if (e.metaKey || e.ctrlKey) {
+    library.toggleSelect(id)
+    return
+  }
+  if (e.shiftKey) {
+    library.rangeSelect(id)
+  } else {
+    library.select(id)
+  }
+  if (app.activeModule.value === 'library') app.setModule('develop')
+}
+
+// 鼠标滚轮 → 横向滚动（deltaMode=1 行模式按 16px/行换算）
+function onWheel(e: WheelEvent) {
+  const track = trackEl.value
+  if (!track) return
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
+  const dx = e.deltaMode === 1 ? e.deltaX * 16 : e.deltaX
+  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? dx : dy
+  if (delta === 0) return
+  track.scrollLeft += delta
+  e.preventDefault()
+}
+
+// 当前活动项滚入可视区（水平方向，不打扰外层布局）
+function scrollToActive() {
+  const track = trackEl.value
+  const el = track?.querySelector<HTMLButtonElement>('.frame.active')
+  if (!track || !el) return
+  const left = el.offsetLeft
+  const right = left + el.offsetWidth
+  if (left < track.scrollLeft + 12) {
+    track.scrollLeft = left - 12
+  } else if (right > track.scrollLeft + track.clientWidth - 12) {
+    track.scrollLeft = right - track.clientWidth + 12
+  }
+}
+watch(() => library.activeId.value, () => {
+  // 等待 active class 应用后再定位
+  requestAnimationFrame(scrollToActive)
+})
+
+// ===== 右键菜单：复制/粘贴参数 + 快速导出该照片 =====
+const ctxMenu = ref<{ x: number; y: number; id: string } | null>(null)
+const clip = useParamClipboard()
+function onFrameContextMenu(id: string, e: MouseEvent) {
+  e.preventDefault()
+  // 该照片设为当前照片（复制/粘贴/导出都以当前照片为对象），菜单贴边收纳
+  library.select(id)
+  ctxMenu.value = {
+    x: Math.min(e.clientX, window.innerWidth - 186),
+    y: Math.min(e.clientY, window.innerHeight - 150),
+    id,
+  }
+  // 关闭监听必须延迟到下一个宏任务安装：若在本次事件派发中（watch 微任务）注册，
+  // 下一次右键事件冒泡到 window 时会被上一次残留的 once 监听立即关闭，菜单时有时无
+  setTimeout(() => {
+    if (!ctxMenu.value) return
+    installCtxListeners()
+  }, 0)
+}
+// 审查报告 U16：三个 once 监听只有被触发的那一个会自解，其余滞留到下一次全局事件
+//（每次开菜单多留 2 个闭包）——改为 AbortController 统一中止，关闭/卸载即清理
+let ctxAbort: AbortController | null = null
+function installCtxListeners(): void {
+  ctxAbort?.abort()
+  ctxAbort = new AbortController()
+  const opt: AddEventListenerOptions = { once: true, signal: ctxAbort.signal }
+  window.addEventListener('click', closeCtxMenu, opt)
+  window.addEventListener('contextmenu', onWindowCtxClose, opt)
+  window.addEventListener('keydown', onCtxKeydown, opt)
+}
+// 右键落在菜单触发元素上（handler 已 preventDefault）：由该 handler 重开菜单，不作为关闭信号
+function onWindowCtxClose(e: MouseEvent) {
+  if (e.defaultPrevented) return
+  closeCtxMenu()
+}
+function closeCtxMenu() {
+  ctxMenu.value = null
+  ctxAbort?.abort()
+  ctxAbort = null
+}
+function ctxExport() {
+  const id = ctxMenu.value?.id
+  ctxMenu.value = null
+  if (!id) return
+  library.select(id)
+  app.requestSingleExport()
+  app.setModule('export')
+}
+
+// 菜单内复制/粘贴参数：作用于当前照片（右键时已切换为该照片）。
+// 粘贴的确认/结果弹窗由全局 ParamClipboardHost 渲染；复制在此处闪现提示。
+const ctxFlashMsg = ref('')
+let ctxFlashTimer = 0
+async function ctxCopyParams() {
+  closeCtxMenu()
+  clip.requestCopy()
+}
+async function ctxPasteParams() {
+  closeCtxMenu()
+  await clip.pasteParams()
+}
+function onCtxKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeCtxMenu()
+}
+onBeforeUnmount(() => {
+  closeCtxMenu()
+  clearTimeout(ctxFlashTimer)
+  cleanupHandleDrag()
+})
+
+// Delete/Backspace 移除确认（LrC 语义：仅从图库移除，不删磁盘原文件）
+const confirmMsg = computed(
+  () =>
+    `将从图库移除 ${library.removalConfirm.value.count} 张照片。仅从软件图库中移除引用与编辑记录，磁盘上的原文件不会被删除。`,
+)
+
+// ===== 顶部拖拽调整高度 =====
+let startY = 0
+let startH = 0
+function onHandleDown(e: PointerEvent) {
+  startY = e.clientY
+  startH = app.state.filmstripHeight
+  window.addEventListener('pointermove', onHandleMove)
+  window.addEventListener('pointerup', onHandleUp)
+  window.addEventListener('pointercancel', onHandleUp)
+  e.preventDefault()
+}
+function onHandleMove(e: PointerEvent) {
+  // 向上拖拽（clientY 减小）→ 高度增加
+  app.setFilmstripHeight(startH + (startY - e.clientY))
+}
+/** 统一清理拖拽监听（pointerup / pointercancel / 组件卸载都走这里；
+ *  审查报告 U3：此前只在 pointerup 清理——事件丢失（触控取消、弹窗抢焦点、
+ *  Alt-Tab）后监听器永久驻留：鼠标移动持续改高度，且组件卸载后无法回收） */
+function cleanupHandleDrag() {
+  window.removeEventListener('pointermove', onHandleMove)
+  window.removeEventListener('pointerup', onHandleUp)
+  window.removeEventListener('pointercancel', onHandleUp)
+}
+function onHandleUp() {
+  cleanupHandleDrag()
+}
+</script>
+
+<template>
+  <div class="filmstrip" :style="{ height: app.filmstripHeightPx.value }">
+    <div class="resize-handle" title="拖拽调整胶片条高度" @pointerdown="onHandleDown" />
+    <div v-if="library.items.length === 0" class="empty">导入照片后这里将显示胶片条</div>
+    <div v-else ref="trackEl" class="track" @wheel="onWheel">
+      <button
+        v-for="item in library.items"
+        :key="item.id"
+        class="frame"
+        :class="{ active: item.id === library.activeId.value, sel: item.selected }"
+        :title="`${item.name}${item.selected ? '（已选中）' : ''}`"
+        :style="{ aspectRatio: item.width && item.height ? `${item.width} / ${item.height}` : '3 / 2' }"
+        @click="onItem(item.id, $event)"
+        @contextmenu="onFrameContextMenu(item.id, $event)"
+      >
+        <img v-if="item.thumbUrl" :src="item.thumbUrl" :alt="item.name" loading="lazy" />
+        <div v-else class="thumb-placeholder" />
+        <span v-if="item.selected" class="sel-dot" />
+      </button>
+    </div>
+    <!-- 右键快捷菜单：复制/粘贴参数 + 快速导出该照片 -->
+    <div
+      v-if="ctxMenu"
+      class="ctx-menu"
+      :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+    >
+      <button class="ctx-item" title="选择要复制的模块" @click="ctxCopyParams">⧉ 复制参数</button>
+      <button class="ctx-item" title="把之前复制的参数粘贴到当前照片" @click="ctxPasteParams">📋 粘贴参数</button>
+      <button class="ctx-item" @click="ctxExport">⬇ 导出该照片</button>
+    </div>
+    <!-- 菜单内复制结果闪现提示 -->
+    <div v-if="ctxFlashMsg" class="ctx-flash">{{ ctxFlashMsg }}</div>
+    <GlassModal
+      v-model="library.removalConfirm.value.open"
+      title="从图库移除"
+      :message="confirmMsg"
+      confirm-text="移除"
+      cancel-text="取消"
+      @confirm="library.confirmRemoval()"
+      @cancel="library.cancelRemoval()"
+    />
+  </div>
+</template>
+
+<style scoped>
+.filmstrip {
+  position: relative;
+  flex: none;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+}
+.resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 5px;
+  cursor: ns-resize;
+  z-index: 3;
+  background: transparent;
+}
+.resize-handle:hover {
+  background: var(--hover);
+}
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+}
+.track {
+  display: flex;
+  gap: 6px;
+  padding: 0 12px;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: center;
+  width: 100%;
+  /* 局部恢复滑动条（全局样式隐藏了所有滚动条） */
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-dim) transparent;
+}
+/* 横向滑动条：细样式，悬停加亮 */
+.track::-webkit-scrollbar {
+  display: block;
+  height: 8px;
+}
+.track::-webkit-scrollbar-track {
+  background: transparent;
+}
+.track::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+.track::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+.frame {
+  position: relative;
+  flex: none;
+  /* 真自适应：高度完整跟随胶片条拖拽高度伸缩（不再设 72px 上限），
+     宽度按每张照片自身宽高比（模板内联 style，未知尺寸回退 3:2）自动计算，
+     竖图/横图都完整显示不裁切，不同屏幕尺寸与胶片条高度下观感一致 */
+  height: calc(100% - 12px);
+  min-height: 32px;
+  width: auto;
+  border-radius: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--canvas-empty);
+  padding: 0;
+  cursor: pointer;
+}
+.frame:hover { background: var(--hover); }
+.frame.active {
+  border-color: var(--text);
+  background: var(--accent);
+}
+.frame.sel {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.frame.sel.active {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* 缩略图未就绪占位（不再回退原图，避免大图解码 OOM） */
+.frame .thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  background: var(--canvas-empty);
+}
+.sel-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text);
+}
+/* 右键快捷菜单（与 Workspace 同构）：fixed 定位不受 track overflow 裁切 */
+.ctx-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 176px;
+  padding: 4px;
+  background: rgba(20, 28, 48, 0.92);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 40px -18px rgba(0, 0, 0, 0.85);
+}
+.ctx-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover {
+  background: var(--hover);
+}
+/* 菜单内复制参数的结果闪现提示 */
+.ctx-flash {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 300;
+  padding: 3px 10px;
+  background: rgba(20, 28, 48, 0.92);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+</style>

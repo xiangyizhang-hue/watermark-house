@@ -1,0 +1,811 @@
+// 保真导出核心：纯 Canvas 手工合成（不用 dom-to-image）。
+// - 主照片以原生像素 1:1 进入画布，其余装饰层按 unitScale 成比例放大，避免降采样。
+// - 支持 PNG(无损) / JPG(高画质) 两种格式选项。
+import type { FrameConfig } from './types'
+import { drawBlurredBackground, drawVignette, drawGrain, drawWatermark, type ImgSource } from './bgRenderer'
+import { drawCreativeWatermark } from './creativeWatermark'
+import { loadWatermarkFonts } from './watermarkFonts'
+import { resolveLogo, preloadBrandLogo } from '../composables/useLogoStore'
+import { drawInfoLayer, preloadInfoLogos } from './infoRenderer'
+import { applyShowToggles } from './showToggles'
+import { buildSrgbICC, embedJpegICC } from './icc'
+import { hexLuminance, hexToRgba, logoAutoColor, footerTextColor } from './colorUtils'
+import { DESIGN_CONTAINER, phoneBrandOf } from './constants'
+import {
+  computeFooterLayout,
+  computeClassicLayout,
+  computeCardLayout,
+  computeMagazineLayout,
+  cardThemeColors,
+  cardBadgeColors,
+  exifTextStyle,
+  lensTextStyle,
+  dateTextStyle,
+  modelTextStyle,
+  CARD_RADIUS,
+  CARD_BADGE_FONT_SIZE,
+  MAG_TITLE_FONT,
+  DIVIDER_MIN_H,
+  DIVIDER_ALPHA,
+  MAG_SUB_SIZE,
+  MAG_SUB_LETTER_SPACING,
+  MAG_SWATCH_COUNT,
+  MAG_SWATCH_W,
+  MAG_SWATCH_H,
+  type FooterLayout,
+  type CardRect,
+} from './infoLayout'
+import { extractPalette, FALLBACK_PALETTE, detectPalette } from './photoPalette'
+import { modelAlias } from './modelAlias'
+import { activeModelMark, modelMarkTintColor, MODEL_MARK_SCALE, MODEL_MARK_TOP_RATIO } from './modelMarks'
+import { resolveModelMark, preloadModelMark } from '../composables/useModelMarkStore'
+import { drawRotatedCropped } from './photoEdit'
+import { createRenderGeometry } from './renderGeometry'
+import { createRenderSurface, type RenderSurfaceFactory } from './renderSurface'
+import { RenderPlanRecorder, type PlanImage, type RenderPlan } from './renderPlan'
+export { computeExportMetrics, estimateExportSize, type ExportMetrics } from './exportMetrics'
+
+export type ExportFormat = 'png' | 'jpg'
+
+export interface ExportOptions {
+  /** 导出格式：png=无损, jpg=高画质有损。默认 png */
+  format?: ExportFormat
+  /** JPG 画质 0~1，默认 0.95（仅在 format='jpg' 时生效） */
+  jpgQuality?: number
+  /** 超采样倍率：>1 让装饰层(文字/Logo/模糊)更锐利，照片本身已是原生分辨率。默认 1 */
+  scale?: number
+  /** bgMode='photo' 时传入的自定义背景图 */
+  backgroundImage?: ImgSource
+  /** 已解析的品牌/自定义 Logo 图（由 useLogoStore 提供，未提供则跳过 Logo 绘制） */
+  logo?: ImgSource
+}
+
+export interface ExportResult {
+  blob: Blob
+  width: number
+  height: number
+  format: ExportFormat
+}
+
+/** 浏览器画布边长上限（Chrome 约 16384），超出 toBlob 会失败 */
+const MAX_DIM = 16384
+
+function sourceSize(img: ImgSource): { w: number; h: number } {
+  if (img instanceof HTMLImageElement) return { w: img.naturalWidth, h: img.naturalHeight }
+  if (typeof SVGImageElement !== 'undefined' && img instanceof SVGImageElement) return { w: img.width.baseVal.value, h: img.height.baseVal.value }
+  return { w: (img as HTMLCanvasElement | OffscreenCanvas).width, h: (img as HTMLCanvasElement | OffscreenCanvas).height }
+}
+
+/** 从 dataURL/src 加载图片（Promise） */
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const im = new Image()
+    im.onload = () => resolve(im)
+    im.onerror = () => reject(new Error('水印图加载失败'))
+    im.src = src
+  })
+}
+
+function fontStr(weight: number, size: number, family: string, italic = false): string {
+  return `${italic ? 'italic ' : ''}${weight} ${size}px ${family}`
+}
+
+/** 圆角矩形路径（不依赖 ctx.roundRect 的兼容实现，用于边框/照片圆角导出） */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const radius = Math.max(0, Math.min(r, w / 2, h / 2))
+  ctx.beginPath()
+  ctx.moveTo(x + radius, y)
+  ctx.arcTo(x + w, y, x + w, y + h, radius)
+  ctx.arcTo(x + w, y + h, x, y + h, radius)
+  ctx.arcTo(x, y + h, x, y, radius)
+  ctx.arcTo(x, y, x + w, y, radius)
+  ctx.closePath()
+}
+
+/** card 白底水印卡绘制（infoLayout='card'）：左列机型+日期 / 右列参数+镜头 / 右端联名标块 */
+function drawCardFooter(
+  ctx: CanvasRenderingContext2D,
+  config: FrameConfig,
+  unitScale: number,
+  contentOX: number,
+  canvasHpx: number,
+): void {
+  const ox = contentOX * unitScale
+  const s = unitScale
+  const canvasBottomY = canvasHpx / unitScale - config.padding - config.bgExpand
+  const L = computeCardLayout(config, canvasBottomY)
+  const theme = cardThemeColors(config.infoCardTheme)
+
+  // 底色卡（圆角矩形）
+  ctx.save()
+  roundRectPath(ctx, ox + L.card.x * s, ox + L.card.y * s, L.card.w * s, L.card.h * s, CARD_RADIUS * s)
+  ctx.fillStyle = theme.card
+  ctx.fill()
+  ctx.restore()
+
+  const drawLine = (
+    r: CardRect,
+    text: string,
+    color: string,
+    weight: number,
+    font: string,
+    align: 'left' | 'right',
+    italic = false,
+  ): void => {
+    if (!text) return
+    ctx.save()
+    ctx.fillStyle = color
+    ctx.font = fontStr(weight, r.h * s, font, italic)
+    ctx.textAlign = align
+    ctx.textBaseline = 'top'
+    ctx.fillText(text, ox + r.x * s, ox + r.y * s)
+    ctx.restore()
+  }
+
+  // 左列：机型（主色，营销名映射与预览一致）/ 日期（次色）
+  if (config.showCameraModel && config.cameraModel) {
+    drawLine(L.model, modelAlias(config.cameraModel), theme.primary, config.cameraModelWeight, config.cameraModelFont, 'left', config.cameraModelItalic)
+  }
+  if (L.date && config.dateText) {
+    const dateS = dateTextStyle(config)
+    drawLine(L.date, config.dateText, theme.secondary, dateS.weight, dateS.font, 'left')
+  }
+  // 右列：参数（主色）/ 镜头（次色），右对齐
+  if (config.showExif && config.exifText) {
+    const exifS = exifTextStyle(config)
+    drawLine(L.exif, config.exifText, theme.primary, exifS.weight, exifS.font, 'right')
+  }
+  if (L.lens && config.lensText) {
+    const lensS = lensTextStyle(config)
+    drawLine(L.lens, config.lensText, theme.secondary, lensS.weight, lensS.font, 'right')
+  }
+
+  // 标块：品牌色圆角小块 + 文字居中（仅手机品牌且有联名文字时）
+  if (L.badge) {
+    const phone = phoneBrandOf(config.brand)
+    if (phone?.badge.text) {
+      const b = L.badge
+      const colors = cardBadgeColors(config.cardBadgeBg, config.cardBadgeFg, config.brand)
+      ctx.save()
+      roundRectPath(ctx, ox + b.x * s, ox + b.y * s, b.w * s, b.h * s, 4 * s)
+      ctx.fillStyle = colors.bg
+      ctx.fill()
+      ctx.restore()
+      ctx.save()
+      ctx.fillStyle = colors.fg
+      ctx.font = `600 ${CARD_BADGE_FONT_SIZE * s}px ${config.fontFamily}`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(phone.badge.text, ox + (b.x + b.w / 2) * s, ox + (b.y + b.h / 2) * s)
+      ctx.restore()
+    }
+  }
+}
+
+/** magazine 杂志编辑布局绘制（infoLayout='magazine'）：顶部标题区 + 底部左取色色卡 / 右机型+参数+日期 */
+function drawMagazineFooter(
+  ctx: CanvasRenderingContext2D,
+  config: FrameConfig,
+  unitScale: number,
+  contentOX: number,
+  canvasHpx: number,
+  palette: string[],
+): void {
+  const ox = contentOX * unitScale
+  const s = unitScale
+  const canvasBottomY = canvasHpx / unitScale - config.padding - config.bgExpand
+  const L = computeMagazineLayout(config, canvasBottomY)
+  const primary = footerTextColor(config.bgMode, config.bgColor, 0.95)
+  const secondary = footerTextColor(config.bgMode, config.bgColor, 0.55)
+  const canvasCtx = ctx as CanvasRenderingContext2D & { letterSpacing?: string }
+
+  const drawText = (
+    x: number,
+    y: number,
+    text: string,
+    size: number,
+    color: string,
+    weight: number,
+    font: string,
+    letterSpacing = 0,
+    align: CanvasTextAlign = 'left',
+    italic = false,
+  ): void => {
+    if (!text) return
+    ctx.save()
+    ctx.fillStyle = color
+    ctx.font = fontStr(weight, size * s, font, italic)
+    ctx.textAlign = align
+    ctx.textBaseline = 'top'
+    if (letterSpacing > 0) canvasCtx.letterSpacing = `${letterSpacing * s}px`
+    ctx.fillText(text, ox + x * s, ox + y * s)
+    // 审查报告 R19：显式复位字距——部分宿主未将其纳入 save/restore 绘制状态，
+    // 不复位会泄漏到后续文本行（右对齐文字被拉长）
+    if (letterSpacing > 0) canvasCtx.letterSpacing = '0px'
+    ctx.restore()
+  }
+
+  // 顶部标题区（上边留白内）：大标题（衬线斜体刊头字，与正文无衬线区分；长标题自适应缩小）
+  // + "PHOTOGRAPHED IN : 日期" 副标题
+  drawText(L.title.x, L.title.y, config.infoTitle, L.titleSize, primary, 700, MAG_TITLE_FONT, 0, 'left', true)
+  if (config.showDate && config.dateText) {
+    drawText(L.subtitle.x, L.subtitle.y, `PHOTOGRAPHED IN : ${config.dateText}`, MAG_SUB_SIZE, secondary, 500, config.fontFamily, MAG_SUB_LETTER_SPACING)
+  }
+
+  // 底部左侧取色色卡（showPalette 关闭时不绘制，与预览一致）
+  if (config.showPalette) {
+    const swatchWidth = MAG_SWATCH_W * MAG_SWATCH_COUNT / palette.length
+    for (let i = 0; i < palette.length; i++) {
+      ctx.save()
+      ctx.fillStyle = palette[i % palette.length]
+      ctx.fillRect(
+        ox + (L.palette.x + i * swatchWidth) * s,
+        ox + L.palette.y * s,
+        swatchWidth * s,
+        MAG_SWATCH_H * s,
+      )
+      ctx.restore()
+    }
+  }
+
+  // 底部右侧信息块（右缘锚点 + 右对齐，不依赖测宽）：机型（大）/ 参数（日期已在副标题，不重复）
+  const modelS = modelTextStyle(config)
+  const exifS = exifTextStyle(config)
+  if (config.showCameraModel && config.cameraModel) {
+    drawText(L.model.x, L.model.y, modelAlias(config.cameraModel), modelS.size, primary, modelS.weight, modelS.font, 0, 'right')
+  }
+  if (config.showExif && config.exifText) {
+    drawText(L.exif.x, L.exif.y, config.exifText, exifS.size, secondary, exifS.weight, exifS.font, 0, 'right')
+  }
+}
+
+async function drawFooter(
+  ctx: CanvasRenderingContext2D,
+  config: FrameConfig,
+  unitScale: number,
+  logo: ImgSource | undefined,
+  contentOX: number,
+  canvasHpx: number,
+  magazinePalette: string[] = FALLBACK_PALETTE,
+): Promise<void> {
+  // card 白底水印卡：独立绘制路径（左右列 + 标块，配色随 infoCardTheme）
+  if (config.infoLayout === 'card') {
+    drawCardFooter(ctx, config, unitScale, contentOX, canvasHpx)
+    return
+  }
+  // magazine 杂志编辑：顶部标题区 + 取色色卡 + 右侧信息块
+  if (config.infoLayout === 'magazine') {
+    drawMagazineFooter(ctx, config, unitScale, contentOX, canvasHpx, magazinePalette)
+    return
+  }
+  const themeColor = config.bgMode === 'solid' && hexLuminance(config.bgColor) > 0.6 ? 0 : 255
+  const logoH = config.logoSize * unitScale
+  const modelH = config.cameraModelSize * unitScale
+  // EXIF / 镜头 / 日期 独立文本样式（缺省跟随整体 INFO 样式 fontSize/fontFamily/textWeight/textOpacity）
+  const exifSize = config.exifFontSize ?? config.fontSize
+  const exifH = exifSize * unitScale
+  const exifFont = config.exifFontFamily ?? config.fontFamily
+  const exifWeight = config.exifTextWeight ?? config.textWeight
+  const exifOpacity = config.exifTextOpacity ?? config.textOpacity
+  const lensSize = config.lensFontSize ?? config.fontSize
+  const lensH = lensSize * unitScale
+  const lensFont = config.lensFontFamily ?? config.fontFamily
+  const lensWeight = config.lensTextWeight ?? config.textWeight
+  const lensOpacity = config.lensTextOpacity ?? config.textOpacity
+  const dateSize = config.dateFontSize ?? config.fontSize
+  const dateFont = config.dateFontFamily ?? config.fontFamily
+  const dateWeight = config.dateTextWeight ?? config.textWeight
+  const dateOpacity = config.dateTextOpacity ?? config.textOpacity
+
+  // 内容区 → 画布（border-box）的像素偏移（含背景区域扩展 bgExpand）
+  const ox = contentOX * unitScale
+
+  // 底部锚点 = 画布底缘（实测画布像素高换算 − padding − bgExpand，内容坐标系），INFO 落在底部留白条内
+  // （与预览 FooterInfo 同源）；最底行文本 top 再上移 overlayBottom 边距
+  const canvasBottomY = canvasHpx / unitScale - config.padding - config.bgExpand
+
+  // ===== 默认排版：与预览共用同一套共享布局计算 =====
+  // classic = 经典纵向堆叠（日期 / EXIF+镜头 / 型号 / Logo）；duo = 杂志双栏；inline = 悬浮双行。
+  // 行高与宽度测量均取各组生效样式，单独修改某组字体/字号后导出与预览保持一致。
+  // 审查报告 R8：占位/未就绪的自定义 Logo（1×1）不能参与比例计算与绘制，否则被拉伸成方块
+  const logoDims = logo ? sourceSize(logo) : { w: 0, h: 0 }
+  const logoRatioForLayout = logoDims.w > 1 && logoDims.h > 1 ? logoDims.w / logoDims.h : 2.6
+  // 机型字标（若有且启用）：布局测宽与绘制共用同一画布（导出前已预载，比例稳定；
+  // 占位 1×1 视为未就绪 → 回退文字排版与文字绘制）
+  const markDef = activeModelMark(config)
+  const markColor = modelMarkTintColor(config)
+  const markRaw = markDef ? resolveModelMark(markDef.file, markColor) : null
+  const markCanvas = markRaw && markRaw.width > 1 && markRaw.height > 1 ? markRaw : null
+  const markRatioForLayout = markCanvas ? markCanvas.width / markCanvas.height : null
+  const layout: FooterLayout =
+    config.infoLayout === 'duo' || config.infoLayout === 'inline'
+      ? computeFooterLayout(config, canvasBottomY, logoRatioForLayout, markRatioForLayout)
+      : computeClassicLayout(config, canvasBottomY)
+  // classic 文本水平对齐：center = 行中心锚点（textAlign:center，与预览 -50% 平移等价）；
+  // right = 右缘锚点（textAlign:right，与预览 -100% 平移等价）；left 与 duo/inline 均为左锚点。
+  const classicTextAlign: CanvasTextAlign | null =
+    config.infoLayout === 'classic' ? (config.overlayAlign === 'center' ? 'center' : config.overlayAlign === 'right' ? 'right' : 'left') : null
+  const rowTextAlign: CanvasTextAlign = classicTextAlign ?? 'left'
+  // 手动拖拽坐标优先（与预览 absStyle 一致）：未拖拽过（null）时才用默认排版
+  let dExifX = config.exifX ?? layout.exif.x
+  let dExifY = config.exifY ?? layout.exif.y
+  let dLogoX = config.logoX ?? layout.logo.x
+  let dLogoY = config.logoY ?? layout.logo.y
+  let dModelX = config.modelX ?? layout.model.x
+  let dModelY = config.modelY ?? layout.model.y
+  let dDateX = config.dateX ?? layout.date.x
+  let dDateY = config.dateY ?? layout.date.y
+  // duo 下镜头行为独立元素（可单独拖拽）；classic 下它是 EXIF 块内附加行，跟随 EXIF 移动
+  let dLensX = config.lensX ?? layout.lens.x
+  let dLensY = config.lensY ?? layout.lens.y
+  // duo 分隔竖线：手动拖拽几何优先（infoDividerX/Top/Bottom），
+  // null = 默认布局（高度自动等于下边白框带全高）
+  const duoDivider = layout.divider
+    ? (() => {
+        const top = config.infoDividerTop ?? layout.divider.y
+        const bottom = config.infoDividerBottom ?? layout.divider.y + layout.divider.h
+        return {
+          x: config.infoDividerX ?? layout.divider.x,
+          y: top,
+          // 审查报告 R15：最小高度与预览统一（此前导出可缩到 0、预览下限 20）
+          h: Math.max(DIVIDER_MIN_H, bottom - top),
+        }
+      })()
+    : null
+  const hasLensText = config.showLens && !!config.lensText
+
+  // duo 分隔竖线：右栏文字左侧（浅灰，颜色随底色自适应）
+  if (duoDivider) {
+    ctx.save()
+    ctx.fillStyle = `rgba(${themeColor},${themeColor},${themeColor},${DIVIDER_ALPHA})`
+    ctx.fillRect(
+      ox + duoDivider.x * unitScale,
+      ox + duoDivider.y * unitScale,
+      unitScale,
+      duoDivider.h * unitScale,
+    )
+    ctx.restore()
+  }
+
+  // 深色背景（模糊/照片填充）下文字加柔和投影（与预览 infoTextShadow 一致）
+  const applyTextShadow = (): void => {
+    if (config.bgMode === 'solid') return
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)'
+    ctx.shadowBlur = 4 * unitScale
+    ctx.shadowOffsetY = 1 * unitScale
+  }
+  // 各组文字颜色：用户自定义色优先（hex → rgba 并应用组透明度），否则回退自适应黑白
+  const paint = (custom: string | null, opacity: number): string =>
+    hexToRgba(custom, opacity) ?? `rgba(${themeColor},${themeColor},${themeColor},${opacity})`
+
+  // inline 布局：手机品牌 Logo 为文字标记，与机型文本（多含品牌名）并排重复，跳过绘制
+  // 审查报告 R8：占位（≤1px，自定义 Logo 冷缓存）时跳过绘制——与 infoRenderer 行为统一
+  const showLogoDraw =
+    config.showLogo &&
+    logo &&
+    logoDims.w > 1 &&
+    logoDims.h > 1 &&
+    !(config.infoLayout === 'inline' && phoneBrandOf(config.brand))
+  if (showLogoDraw && logo) {
+    const lw = logoH * (logoDims.w / logoDims.h)
+    // classic 水平锚点语义与文本行一致：center = 行中心（Logo 左移半宽）、right = 右缘（左移全宽）、
+    // left 与 duo/inline 的 x 为左缘锚点。预览端由 absStyle 的 translate 等价实现。
+    const logoShift = config.infoLayout === 'classic' ? (config.overlayAlign === 'center' ? -lw / 2 : config.overlayAlign === 'right' ? -lw : 0) : 0
+    ctx.save()
+    ctx.globalAlpha = config.logoOpacity
+    applyTextShadow()
+    ctx.drawImage(logo, ox + dLogoX * unitScale + logoShift, ox + dLogoY * unitScale, lw, logoH)
+    ctx.restore()
+  }
+  // 与预览一致：存储值可能是旧版本写入的机身代号，导出前统一翻译成营销名（映射幂等）
+  const modelText = modelAlias(config.cameraModel)
+  if (config.showCameraModel && modelText && markCanvas) {
+    // 机型字标：按「字号 × MODEL_MARK_SCALE」等比绘制（视觉高度与文字一致），
+    // 画布上下各留 MODEL_MARK_TOP_RATIO 行内边距；classic 水平锚点语义与文本行一致
+    // （center = 行中心 / right = 右缘，对应左移自身宽度），inline/duo 的 x 为左缘锚点
+    const mh = modelH * MODEL_MARK_SCALE
+    const mw = mh * (markCanvas.width / markCanvas.height)
+    const markShift =
+      config.infoLayout === 'classic'
+        ? config.overlayAlign === 'center'
+          ? -mw / 2
+          : config.overlayAlign === 'right'
+            ? -mw
+            : 0
+        : 0
+    ctx.save()
+    ctx.globalAlpha = config.cameraModelOpacity
+    applyTextShadow()
+    ctx.drawImage(
+      markCanvas,
+      ox + dModelX * unitScale + config.cameraModelOffsetX * unitScale + markShift,
+      ox + dModelY * unitScale + config.cameraModelOffsetY * unitScale + modelH * MODEL_MARK_TOP_RATIO,
+      mw,
+      mh,
+    )
+    ctx.restore()
+  } else if (config.showCameraModel && modelText) {
+    ctx.save()
+    ctx.fillStyle = paint(config.cameraModelColor, config.cameraModelOpacity)
+    ctx.font = fontStr(config.cameraModelWeight, modelH, config.cameraModelFont, config.cameraModelItalic)
+    ctx.textAlign = rowTextAlign
+    ctx.textBaseline = 'top'
+    applyTextShadow()
+    ctx.fillText(
+      modelText,
+      ox + dModelX * unitScale + config.cameraModelOffsetX * unitScale,
+      ox + dModelY * unitScale + config.cameraModelOffsetY * unitScale,
+    )
+    ctx.restore()
+  }
+  // 镜头行（独立元素，可单独拖拽）：classic / duo / inline 下统一绘制
+  // （修复：classic 下镜头行曾嵌在 EXIF 块内不可独立定位；inline 布局完全未渲染镜头行）
+  if (hasLensText && ['classic', 'duo', 'inline'].includes(config.infoLayout)) {
+    ctx.save()
+    ctx.fillStyle = paint(config.lensTextColor, lensOpacity)
+    ctx.font = fontStr(lensWeight, lensH, lensFont)
+    // duo 为左缘锚点；inline 为居中锚点（x=center）；classic 沿用经典水平锚点语义
+    ctx.textAlign =
+      config.infoLayout === 'inline' ? 'center' : config.infoLayout === 'classic' ? rowTextAlign : 'left'
+    ctx.textBaseline = 'top'
+    applyTextShadow()
+    ctx.fillText(config.lensText, ox + dLensX * unitScale, ox + dLensY * unitScale)
+    ctx.restore()
+  }
+  if (config.showExif && config.exifText) {
+    ctx.save()
+    ctx.fillStyle = paint(config.exifTextColor, exifOpacity)
+    ctx.font = fontStr(exifWeight, exifH, exifFont)
+    ctx.textAlign = rowTextAlign
+    ctx.textBaseline = 'top'
+    applyTextShadow()
+    ctx.fillText(config.exifText, ox + dExifX * unitScale, ox + dExifY * unitScale)
+    ctx.restore()
+  }
+  // 拍摄日期：样式完全独立（dateFontSize ?? 全局），与机型样式组零耦合——
+  // 调整相机型号字号/字体/颜色时日期纹丝不动（与 infoLayout/FooterInfo 三端同源）
+  if (config.showDate && config.dateText) {
+    ctx.save()
+    ctx.fillStyle = paint(config.dateTextColor, dateOpacity)
+    ctx.font = fontStr(dateWeight, dateSize * unitScale, dateFont, false)
+    ctx.textAlign = rowTextAlign
+    ctx.textBaseline = 'top'
+    applyTextShadow()
+    ctx.fillText(config.dateText, ox + dDateX * unitScale, ox + dDateY * unitScale)
+    ctx.restore()
+  }
+}
+
+
+/**
+ * 绘制全部图层，像素画布和指令录制共用此入口，不在这里编码图片。
+ */
+export async function renderExportSurface(
+  source: ImgSource,
+  config: FrameConfig,
+  options: ExportOptions = {},
+  factory?: RenderSurfaceFactory,
+): Promise<HTMLCanvasElement> {
+  const supersample = options.scale && options.scale > 0 ? options.scale : 1
+  // 审查报告 R5：入口数值校验——NaN / 非法旋转或裁剪会让后续计算一路 NaN
+  //（Math.max(1, NaN) 仍为 NaN），直到 toBlob 才报「canvas.toBlob 失败」；
+  // 此处快速失败给出明确原因。
+  if (!Number.isFinite(config.photoRotation) || !Number.isFinite(config.scale)) {
+    throw new Error('导出参数异常（旋转 / 缩放数值非法），请重置参数后重试')
+  }
+  const cropCheck = config.photoCrop
+  if (
+    cropCheck &&
+    (!Number.isFinite(cropCheck.x) ||
+      !Number.isFinite(cropCheck.y) ||
+      !Number.isFinite(cropCheck.w) ||
+      !Number.isFinite(cropCheck.h) ||
+      cropCheck.w <= 0 ||
+      cropCheck.h <= 0)
+  ) {
+    throw new Error('导出参数异常（裁剪区域非法），请重置裁剪后重试')
+  }
+  // 显示开关 → 生效配置（隐藏边框/背景时 padding/bgMode 等归零），导出与预览缩放同源
+  config = applyShowToggles(config)
+  // Logo 着色：'auto' 时随背景明暗取黑/白，保证浅色相框下 Logo 不与底色融为一体
+  const logoColor = logoAutoColor(config.logoColor, config.bgMode, config.bgColor)
+
+  // 字体就绪后再绘制，避免文字错位
+  if (document.fonts?.ready) await document.fonts.ready
+  await loadWatermarkFonts(config.creativeWatermark)
+  // 确保内置品牌真实图形 Logo 已加载完成（带颜色缓存键，避免导出拿到占位画布）
+  await preloadBrandLogo(config.brand, logoColor)
+  // 机型字标（若有且启用）同步预载：保证绘制阶段拿到完整画布而非占位
+  const markDefForPreload = activeModelMark(config)
+  if (markDefForPreload && config.showCameraModel) {
+    await preloadModelMark(markDefForPreload.file, modelMarkTintColor(config))
+  }
+  // 预加载自定义水印图（若存在），保证导出时可用
+  let watermarkImg: ImgSource | null = null
+  if (config.watermarkImage) {
+    // 审查报告 R6：水印图加载失败不阻断导出（与预览端一致——预览失败静默跳过水印），
+    // 此前 onerror 直接 reject 会让整张导出失败
+    try {
+      watermarkImg = await loadImage(config.watermarkImage)
+    } catch {
+      watermarkImg = null
+    }
+  }
+
+  const { w: sw, h: sh } = sourceSize(source)
+  if (!sw || !sh) throw new Error('源图尺寸无效，无法导出')
+
+  // 以原生分辨率排版：度量计算已提取为 computeExportMetrics（与任务卡预估同源）
+  const geometry = createRenderGeometry(sw, sh, config, supersample)
+  const M = geometry.metrics
+  const { canvasW, canvasH, designCanvasH, unitScale, photoW, photoH } = M
+  // 审查报告 R5：总面积上限（部分引擎按面积而非仅单边限制；Chromium 单边 16384 且面积有限）
+  if (canvasW * canvasH > 200_000_000) {
+    throw new Error('导出尺寸过大（超过 2 亿像素），请降低照片缩放或超采样倍数')
+  }
+  const { photoDesignW, photoDesignH, bgExpand, effectivePad, effectivePadBottom } = M
+
+  // 照片在内容区左上角坐标（null 时水平居中；自由模式垂直贴顶、比例模式垂直居中）
+  const { x: photoContentX, y: photoContentY } = geometry.photoContent
+
+  if (canvasW > MAX_DIM || canvasH > MAX_DIM) {
+    throw new Error(`导出尺寸 ${canvasW}×${canvasH} 超出浏览器画布上限 ${MAX_DIM}px，请降低 scale 或使用更小的源图`)
+  }
+
+  const canvas = createRenderSurface(canvasW, canvasH, factory)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法获取 Canvas 2D 上下文')
+
+  // ===== 图层绘制（同心嵌套结构：由内向外构建「照片→背景→边框→画板」，由外向内绘制「画板→边框→背景→照片」） =====
+  // 内容区（边框内侧）参数：背景层与边框层共用，同心嵌套
+  const padTop = effectivePad * unitScale
+  const padX = effectivePad * unitScale
+  const padBottom = effectivePadBottom * unitScale
+  const frameRadius = config.borderRadius * unitScale
+  const innerW = canvasW - 2 * padX
+  const innerH = canvasH - padTop - padBottom
+
+  // 无边框且无背景扩展（padding=0 且 bgExpand=0）时：画板/背景层跟随照片圆角，形成圆角卡片，
+  // 与预览一致，避免照片圆角外露出方形背景/边框色块（PNG 导出四角为透明）。
+  const noFrame = effectivePad <= 0 && bgExpand <= 0
+  const outerRadius = noFrame ? config.photoRadius * unitScale : frameRadius
+  const innerRadius = noFrame
+    ? config.photoRadius * unitScale
+    : Math.max(0, frameRadius - padX) // 内圆角同心：外圆角 - 边框宽
+
+  // 0) 画板底色兜底（边框色；正常使用时背景层/边框层会覆盖它，隐藏背景层时可见）。
+  //    无边框时按照片圆角裁切，使四角透明。
+  ctx.save()
+  roundRectPath(ctx, 0, 0, canvasW, canvasH, outerRadius)
+  ctx.fillStyle = config.borderColor
+  ctx.fill()
+  ctx.restore()
+
+  // 1) 边框层：纯色相框（包裹背景内容区的一圈），带圆角。
+  // 绘制顺序在背景之前：背景层扩宽(bgExpand>0)时可覆盖边框区，与预览 z-index 一致。
+  if (innerW > 0 && innerH > 0) {
+    ctx.save()
+    ctx.beginPath()
+    // 外圈用 outerRadius：无边框时 = 内圆角，evenodd 填充结果为空（边框层不绘制）
+    roundRectPath(ctx, 0, 0, canvasW, canvasH, outerRadius)
+    roundRectPath(ctx, padX, padTop, innerW, innerH, innerRadius)
+    ctx.fillStyle = config.borderColor
+    ctx.fill('evenodd')
+    ctx.restore()
+  }
+
+  // 2) 背景图层（受 layerVisible.bg 与 显示开关 showBackground 控制，与预览一致）：
+  //    背景区域 = 画板 content box（边框内侧），canvasW 已含 bgExpand，innerW/H 即背景区域尺寸。
+  const bgVisible = config.layerVisible.bg !== false && config.showBackground
+  const bgW = innerW
+  const bgH = innerH
+  const bgX = padX
+  const bgY = padTop
+  if (bgVisible && bgW > 0 && bgH > 0) {
+    ctx.save()
+    roundRectPath(ctx, bgX, bgY, bgW, bgH, innerRadius)
+    ctx.clip()
+    if (config.bgMode === 'solid') {
+      // 纯色背景：直接填充背景区域
+      ctx.fillStyle = config.bgColor
+      ctx.fillRect(bgX, bgY, bgW, bgH)
+    } else if (config.bgMode === 'blur') {
+      // 背景模糊：原图模糊铺满背景区域（不压暗，与预览一致）
+      if (source) {
+        const offX = config.bgOffsetX * unitScale
+        const offY = config.bgOffsetY * unitScale
+        ctx.translate(bgX, bgY)
+        drawBlurredBackground(ctx, source, bgW, bgH, config.blur * unitScale, 1, config.bgScale, offX, offY)
+      }
+    } else if (config.bgMode === 'photo') {
+      // 照片填充：自定义图片模糊但保持原亮
+      const bgImg = options.backgroundImage || source
+      if (bgImg) {
+        const offX = config.bgOffsetX * unitScale
+        const offY = config.bgOffsetY * unitScale
+        ctx.translate(bgX, bgY)
+        drawBlurredBackground(ctx, bgImg, bgW, bgH, config.blur * unitScale, 1, config.bgScale, offX, offY)
+      }
+    } else {
+      ctx.fillStyle = '#0a0a0a'
+      ctx.fillRect(bgX, bgY, bgW, bgH)
+    }
+    ctx.restore()
+  }
+
+  // 2) 主照片图层（受 layerVisible.photo 控制）
+  const photoVisible = config.layerVisible.photo !== false
+  // magazine 取色色卡：从合成后的照片像素提取主色（照片隐藏时回退兜底色）
+  let magazinePalette = FALLBACK_PALETTE
+  // 加 effectivePad + bgExpand 得画布坐标（内容区原点在画布 padding + 背景扩展内侧）；
+  // photoContentX/Y 已在上面按「null 时水平居中/垂直贴顶」计算，此处复用。
+  const px = (effectivePad + bgExpand + photoContentX) * unitScale
+  const py = (effectivePad + bgExpand + photoContentY) * unitScale
+  const photoRadiusPx = config.photoRadius * unitScale
+  if (photoVisible) {
+    const photoCanvas = createRenderSurface(photoW, photoH, factory)
+    const pctx = photoCanvas.getContext('2d')
+    if (!pctx) throw new Error('无法获取离屏 Canvas 上下文')
+    // 照片圆角裁切（photoRadius 设计 px → 像素）
+    roundRectPath(pctx, 0, 0, photoW, photoH, photoRadiusPx)
+    pctx.clip()
+    // 旋转+裁剪：把源图对应区域旋转为正向后绘制到 photoW×photoH
+    drawRotatedCropped(pctx, source, sw, sh, config.photoRotation, config.photoCrop, photoW, photoH)
+    if (config.infoLayout === 'magazine' && config.showPalette) {
+      // 审查报告 R7：取色源与预览统一为「原图」——此前用旋转+裁剪后的照片画布，
+      // 用户旋转/裁剪后色卡颜色与预览不一致
+      magazinePalette = config.paletteColors?.length ? config.paletteColors : config.photoSrc
+        ? await detectPalette(config.photoSrc, config.paletteCount)
+        : extractPalette(source, sw, sh, config.paletteCount) ?? []
+      if (!magazinePalette.length) throw new Error('照片取色失败，请重新提取后导出')
+    }
+
+    ctx.save()
+    if (config.shadow > 0) {
+      // 与预览 --photo-shadow 一致的立体阴影参数（作用在照片上，画板无阴影）
+      ctx.shadowColor = `rgba(0,0,0,${Math.min(0.85, config.shadow * 0.85).toFixed(3)})`
+      ctx.shadowBlur = 60 * unitScale * config.shadow
+      ctx.shadowOffsetY = 18 * unitScale * config.shadow
+    }
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(photoCanvas, px, py)
+    ctx.restore()
+  }
+
+  // 3) 信息图层（顶层：Logo + 相机型号 + EXIF），受 layerVisible.info 与 显示开关 showInfo 控制
+  const infoVisible = config.layerVisible.info !== false
+  if (infoVisible && config.showInfo) {
+    // 若调用方未显式传入 logo（如自定义 Logo），则使用内置品牌 Logo（暗白双版）
+    const footerLogo = options.logo ?? (config.showLogo ? resolveLogo(config.brand, logoColor) : undefined)
+    await drawFooter(ctx, config, unitScale, footerLogo, effectivePad + bgExpand, canvas.height, magazinePalette)
+  }
+
+  // 3.5) 顶层 INFO 多元素容器层（自由拖拽排版）：与预览 InfoLayerDisplay 一致
+  if (infoVisible && config.infoLayer?.enabled && config.showInfo) {
+    // 预载内置品牌 Logo，确保导出拿到完整画布
+    await preloadInfoLogos(config.infoLayer)
+    const canvasCenter = { x: DESIGN_CONTAINER / 2, y: designCanvasH / 2 }
+    // 照片变换矩阵（设计 px 空间，未含 unitScale）：先平移到照片中心（含 pad + 背景扩展），再旋转
+    const photoCx = effectivePad + bgExpand + photoContentX + photoDesignW / 2
+    const photoCy = effectivePad + bgExpand + photoContentY + photoDesignH / 2
+    const outerMatrix = new DOMMatrix()
+      .translate(photoCx, photoCy)
+      .rotate(config.photoRotation)
+    ctx.save()
+    ctx.scale(unitScale, unitScale)
+    drawInfoLayer(ctx, config.infoLayer, {
+      exifRaw: config.exifRaw,
+      model: modelAlias(config.cameraModel),
+      eqFocal: config.eqFocal,
+      cropFactor: config.cropFactor,
+      outerMatrix: config.infoLayer.bindTarget === 'photo' ? outerMatrix : undefined,
+      canvasCenter,
+      unitScale: 1, // 已通过 ctx.scale 处理
+    })
+    ctx.restore()
+  }
+
+  // 4) 附加效果层：暗角 + 颗粒 + 水印（顶层，受 layerVisible 一致约束）
+  if (config.layerVisible.info !== false) {
+    if (config.vignette > 0) drawVignette(ctx, canvasW, canvasH, config.vignette)
+    if (config.grain > 0) drawGrain(ctx, canvasW, canvasH, config.grain, 7)
+    if (config.showWatermark) {
+      drawWatermark(ctx, canvasW, canvasH, {
+        text: config.watermarkText,
+        image: watermarkImg,
+        opacity: config.watermarkOpacity,
+        size: config.watermarkSize,
+        angle: config.watermarkAngle,
+        tile: config.watermarkTile,
+        align: config.watermarkAlign,
+        bottom: config.watermarkBottom * unitScale,
+        tint: config.watermarkTint,
+        position: config.watermarkPosition,
+      })
+    }
+  }
+
+  // 5) 导出
+  if (config.layerVisible.info !== false) drawCreativeWatermark(ctx, canvasW, canvasH, config.creativeWatermark)
+  return canvas
+}
+
+/** Record the full existing layout without allocating output-sized canvas buffers. */
+export async function recordExportPlan(
+  source: ImgSource, config: FrameConfig,
+  resolveImage: (image: CanvasImageSource) => Omit<PlanImage, 'id'>,
+  options: ExportOptions = {},
+): Promise<RenderPlan> {
+  const measuringCanvas = document.createElement('canvas')
+  measuringCanvas.width = measuringCanvas.height = 1
+  const measuring = measuringCanvas.getContext('2d')
+  if (!measuring) throw new Error('无法创建文字测量上下文')
+  const recorder = new RenderPlanRecorder(measuring, resolveImage)
+  const root = await renderExportSurface(source, config, options, recorder.createSurface)
+  return recorder.finish(root)
+}
+
+/** Browser encoder consumes the same rendered surface used by portable recording. */
+export async function exportFrame(
+  source: ImgSource, config: FrameConfig, options: ExportOptions = {},
+): Promise<ExportResult> {
+  const canvas = await renderExportSurface(source, config, options)
+  const format = options.format ?? 'png'
+  const isJpg = format === 'jpg'
+  const jpgQuality = options.jpgQuality ?? 0.95
+  const mime = isJpg ? 'image/jpeg' : 'image/png'
+  let blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('canvas.toBlob 失败'))),
+      mime,
+      isJpg ? jpgQuality : undefined, // PNG 忽略 quality，保证无损
+    )
+  })
+  // JPG 嵌入 sRGB ICC（#6 折中）：canvas 像素已是 sRGB，但 toBlob 不写 ICC 标签，
+  // 部分看图软件/平台在无标签时会错误猜解读导致「导出后偏色」。
+  if (isJpg) {
+    blob = new Blob([embedJpegICC(await blob.arrayBuffer(), buildSrgbICC())], { type: mime })
+  }
+
+  return { blob, width: canvas.width, height: canvas.height, format }
+}
+
+/** 触发浏览器下载 */
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 延迟释放，确保下载已触发
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/** 生成导出文件名：frame_时间戳.ext */
+export function makeExportFilename(format: ExportFormat, prefix = 'frame'): string {
+  const ts = Date.now()
+  return `${prefix}_${ts}.${format === 'jpg' ? 'jpg' : 'png'}`
+}
+
+/**
+ * 便捷封装：合成 + 下载一步完成。
+ */
+export async function exportAndDownload(
+  source: ImgSource,
+  config: FrameConfig,
+  options: ExportOptions = {},
+): Promise<ExportResult> {
+  const result = await exportFrame(source, config, options)
+  downloadBlob(result.blob, makeExportFilename(result.format))
+  return result
+}

@@ -1,0 +1,162 @@
+<script setup lang="ts">
+// FrameLab 滑块：轨道 6px / 手柄 12px / 数字冷灰 / 字重 400
+import { computed, ref, watch } from 'vue'
+
+const props = withDefaults(
+  defineProps<{
+    modelValue: number
+    min?: number
+    max?: number
+    step?: number
+    label?: string
+    suffix?: string
+    unit?: string
+    disabled?: boolean
+  }>(),
+  { min: 0, max: 100, step: 1, suffix: '', unit: '', disabled: false },
+)
+
+const emit = defineEmits<{ 'update:modelValue': [value: number] }>()
+
+const fillPercent = computed(() => {
+  const p = ((props.modelValue - props.min) / (props.max - props.min)) * 100
+  return Math.min(100, Math.max(0, p))
+})
+
+function onInput(e: Event) {
+  emit('update:modelValue', Number((e.target as HTMLInputElement).value))
+}
+
+const inputEl = ref<HTMLInputElement | null>(null)
+// 审查报告 U14：父级钳制/取整导致 modelValue 未实际变化时，Vue 不会 patch DOM——
+// 手柄会停在拖动位置、与右侧数值长期漂移；watch 强制回写保证两者一致
+watch(
+  () => props.modelValue,
+  (v) => {
+    const el = inputEl.value
+    if (el && el.value !== String(v)) el.value = String(v)
+  },
+)
+</script>
+
+<template>
+  <!-- 单行布局：label 左 → 滑块中间 → 数值右 -->
+  <div class="range-slider" :class="{ disabled }">
+    <span class="label" v-if="label">{{ label }}</span>
+    <input
+      ref="inputEl"
+      class="track"
+      type="range"
+      :min="min"
+      :max="max"
+      :step="step"
+      :value="modelValue"
+      :disabled="disabled"
+      :style="{ '--fill': fillPercent + '%' }"
+      @input="onInput"
+    />
+    <span class="value">{{ modelValue }}{{ unit || suffix }}</span>
+  </div>
+</template>
+
+<style scoped>
+.range-slider {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px; /* 滑块垂直间距 ≈8px 通过外层 gap 控制 */
+}
+.range-slider.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.label {
+  flex: none;
+  width: 76px; /* 固定标签宽，统一对齐 */
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400; /* 禁止粗体 */
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.track {
+  flex: 1;
+  min-width: 0; /* 防止挤压溢出 */
+}
+.value {
+  flex: none;
+  width: 52px; /* 容纳 "200px" / "0.5" 等最宽值，统一列宽 */
+  color: var(--text-num);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  line-height: 16px;
+}
+/* 细长轨道：input 与手柄等高（12px），轨道以背景渐变绘制为垂直居中的 6px 条。
+   手柄不依赖负 margin 偏移，与轨道条中心天然重合，
+   规避 (5-12)/2=-3.5px 半像素在 DPI 缩放下舍入造成的不居中。 */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 12px;
+  border-radius: 0;
+  background: linear-gradient(
+      to right,
+      var(--slider-thumb) var(--fill),
+      var(--slider-track) var(--fill)
+    )
+    no-repeat center / 100% 6px;
+  outline: none;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--slider-thumb);
+  border: none;
+  box-shadow: none;
+  margin-top: 0; /* 与等高 track 顶部对齐即居中，无需偏移 */
+  transition: background 0.1s;
+}
+input[type='range']:hover::-webkit-slider-thumb,
+input[type='range']:active::-webkit-slider-thumb {
+  background: var(--slider-thumb-hover);
+}
+input[type='range']:active::-webkit-slider-thumb {
+  background: var(--pressed);
+}
+input[type='range']::-webkit-slider-runnable-track {
+  background: transparent;
+  border: none;
+  height: 12px;
+}
+input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: var(--slider-thumb);
+  box-shadow: none;
+}
+input[type='range']:hover::-moz-range-thumb { background: var(--slider-thumb-hover); }
+input[type='range']:active::-moz-range-thumb { background: var(--pressed); }
+input[type='range']::-moz-range-track {
+  background: var(--slider-track);
+  height: 6px;
+  border: none;
+}
+input[type='range']::-moz-range-progress {
+  background: var(--slider-thumb);
+  height: 6px;
+}
+</style>

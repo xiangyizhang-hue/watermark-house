@@ -1,0 +1,376 @@
+:root {
+  /* 布局变量（useCssVars 运行时动态写入，此处为回退默认值，与 types.ts 默认值 + useCssVars VAR_MAP 对齐） */
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --footer-text-color: rgba(255, 255, 255, 0.95);
+  --logo-size: 150px;
+  --logo-opacity: 1;
+  --camera-model-size: 40px;
+  --camera-model-weight: 600;
+  --camera-model-opacity: 1;
+  --camera-model-italic: normal;
+  --camera-model-display: block;
+  --camera-model-font-family: var(--font-family);
+  --camera-model-offset-x: 0px;
+  --camera-model-offset-y: 0px;
+  --exif-display: none;
+  --date-display: none;
+
+  /* 通用 UI token —— 专业暗色工作站配色（原创冷灰蓝体系）
+     软件外壳/全局底栏 #1A1B1E（仅外壳）；参数面板容器 #2B2D31；分割线 #3E4249；
+     选中/Tab #4A4E57；hover #3A3E46；按下 #33363D；底按钮 #3E4249。 */
+  --shell: #1a1b1e;
+  --panel: #2b2d31;
+  --panel-2: #2b2d31;
+  --panel-3: #383b41;
+  --border: #3e4249;
+  --text: #d6d8dc;
+  --text-dim: #b4b8bf;
+  --text-num: #9a9fa8;
+  --accent: #4a4e57;
+  --accent-border: #3e4249;
+  --accent-bg: rgba(0, 0, 0, 0);
+  --hover: #3a3e46;
+  --pressed: #33363d;
+  --panel-bg: #2b2d31;
+  --panel-border: #3e4249;
+  --panel-hover: #3a3e46;
+  --text-muted: #b4b8bf;
+  --text-normal: #d6d8dc;
+  --checker: #76797f;
+  --slider-track: #4d5158;
+  --slider-thumb: #a7abb2;
+  --slider-thumb-hover: #b9bdc4;
+  --btn-bg: #383b41;
+  /* 预览画布专用色 */
+  --canvas-empty: #75787e;
+  --canvas-loaded: #000000;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+/* ===== 暗色设计（固定）：FrameLab 冷灰蓝外壳 ===== */
+body.theme-dark {
+  background: var(--shell);
+  color: var(--text-normal);
+  /* 系统无衬线字体、常规字重，保证专业阅读体验 */
+  font-family: 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-weight: 400;
+}
+
+body {
+  /* 固定系统字体：INFO 字体设置只作用于画板 INFO 文字（var(--font-family)），
+     不随其变化而让整个 UI 跳字 */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+/* ===== Android / 窄屏布局补充 =====
+   MobileShell 使用独立的 safe-area 和 bottom sheet，但复用的图库、导出、模板
+   组件仍带有桌面版的紧凑尺寸；这里只在窄屏覆盖外壳尺寸和触控区域，不改变桌面布局。 */
+@media (max-width: 720px) {
+  html,
+  body,
+  #app {
+    min-height: 100dvh;
+    height: 100dvh;
+  }
+
+  body {
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .app-root.is-mobile-app {
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+
+  .mobile-library-page .library-view {
+    min-height: 0;
+  }
+  .mobile-library-page .library-view .dropzone {
+    padding: 0 16px 18px;
+    border: 0;
+  }
+  .mobile-library-page .library-view .lib-toolbar {
+    gap: 8px;
+    margin: 0 0 12px;
+    padding-top: 4px;
+  }
+  .mobile-library-page .library-view .lib-toolbar .btn {
+    min-height: 44px;
+    padding: 0 12px;
+    border-radius: 11px;
+    font-size: 14px;
+  }
+  .mobile-library-page .library-view .lib-toolbar .count {
+    width: 100%;
+    font-size: 13px;
+  }
+  .mobile-library-page .library-view .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .mobile-library-page .library-view .cell {
+    min-width: 0;
+    border-radius: 14px;
+  }
+  .mobile-library-page .library-view .cell img,
+  .mobile-library-page .library-view .cell .thumb-placeholder {
+    height: clamp(128px, 34vw, 190px);
+  }
+  .mobile-library-page .library-view .meta {
+    height: 38px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+  .mobile-library-page .library-view .enter {
+    position: static;
+    flex: 1;
+    min-width: 48px;
+    min-height: 48px;
+    border-radius: 9px;
+    opacity: .95;
+    font-size: 14px;
+  }
+  .mobile-library-page .library-view .cell-actions { display:flex; gap:8px; padding:0 8px 8px; }
+  .mobile-library-page .library-view .cell-more { position:static; display:inline-flex; width:48px; height:48px; flex:none; }
+  .mobile-library-page .library-view .photo-check {
+    top: 8px;
+    left: 8px;
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 8px;
+    border-radius: 9px;
+    font-size: 12px;
+  }
+  .mobile-library-page .library-view .photo-check input {
+    width: 20px;
+    height: 20px;
+  }
+  .mobile-library-page .library-view .empty {
+    min-height: 48dvh;
+    padding: 28px 12px;
+    text-align: center;
+  }
+  .mobile-library-page .library-view .empty h2 {
+    color: #f4f7fb;
+    font-size: 24px;
+  }
+  .mobile-library-page .library-view .empty p {
+    font-size: 14px;
+  }
+  .mobile-library-page .library-view .empty .btn-primary {
+    min-height: 50px;
+    padding: 0 24px;
+    border-radius: 13px;
+    font-size: 15px;
+  }
+
+  .mobile-editor-page .workspace {
+    min-height: 0;
+    background: #0b1220;
+  }
+  .mobile-editor-page .workspace .stage {
+    padding: 10px;
+    background: #0b1220;
+  }
+  .mobile-editor-page .workspace .zoom-indicator {
+    right: 12px;
+    bottom: 12px;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    border-radius: 9px;
+    font-size: 12px;
+  }
+
+  .mobile-export-page .export-view {
+    min-height: 0;
+    padding: 14px 12px 18px;
+    overflow: auto;
+  }
+  .mobile-export-page .export-view .page-head {
+    margin-bottom: 12px;
+  }
+  .mobile-export-page .export-view .page-head .title {
+    font-size: 22px;
+  }
+  .mobile-export-page .export-view .page-head .sub {
+    font-size: 13px;
+    line-height: 19px;
+  }
+  .mobile-export-page .export-view .layout {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .mobile-export-page .export-view .card {
+    padding: 14px;
+    border-radius: 14px;
+  }
+  .mobile-export-page .export-view .group-head {
+    min-height: 32px;
+  }
+  .mobile-export-page .export-view .row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 0;
+  }
+  .mobile-export-page .export-view .row > label:first-child {
+    min-width: 64px;
+  }
+  .mobile-export-page .export-view .seg {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 48px;
+    border-radius: 12px;
+    max-width: 100%;
+  }
+  .mobile-export-page .export-view .seg button,
+  .mobile-export-page .export-view .btn {
+    min-height: 48px;
+    height: auto;
+    border-radius: 10px;
+    font-size: 14px;
+  }
+  .mobile-export-page .export-view .thumb-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .mobile-export-page .export-view .taskbar {
+    position: static;
+    margin-top: 10px;
+  }
+
+  /* Teleported template / preferences dialogs lose the .mobile-shell ancestor,
+     so use the same viewport guard for their phone presentation. */
+  .tp-modal {
+    width: calc(100vw - 20px) !important;
+    max-width: none !important;
+    height: min(90dvh, 760px) !important;
+    max-height: none !important;
+    display: flex !important;
+    flex-direction: column !important;
+    border-radius: 18px !important;
+  }
+  .tp-body {
+    min-height: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+  .tp-left,
+  .tp-right {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  .tp-right {
+    display: none !important;
+  }
+  .tp-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  .pref-box {
+    width: calc(100vw - 24px) !important;
+    max-height: 90dvh !important;
+    border-radius: 18px !important;
+  }
+}
+
+/* `?mobile=1` 以及 Android Tauri 的模板/设置弹窗会 Teleport 到 body；
+   body 类保证在桌面浏览器模拟窄屏时也能验证同一套尺寸，不依赖浏览器 viewport。 */
+body.is-mobile-app .tp-modal {
+  width: calc(100vw - 20px);
+  max-width: none;
+  height: min(90dvh, 760px);
+  max-height: none;
+  border-radius: 18px;
+}
+body.is-mobile-app .tp-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+body.is-mobile-app .tp-grid-col {
+  flex: 1 1 55%;
+  min-height: 0;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+}
+body.is-mobile-app .tp-preview-col {
+  flex: 1 1 45%;
+  min-height: 0;
+}
+body.is-mobile-app .tp-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+body.is-mobile-app .tp-card-thumb {
+  height: clamp(110px, 28vw, 180px);
+}
+body.is-mobile-app .tp-save { flex-wrap: wrap; gap: 8px; }
+body.is-mobile-app .tp-save-inp { min-height: 48px; font-size: 16px; flex-basis: 180px; }
+body.is-mobile-app .tp-save-btn { min-height: 48px; font-size: 16px; padding: 8px 12px; }
+body.is-mobile-app .tp-save-tip { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+body.is-mobile-app .tp-head { height:auto; min-height:64px; padding:8px 16px; }
+body.is-mobile-app .tp-title { font-size:18px; }
+body.is-mobile-app .tp-close { width:48px; height:48px; border-radius:12px; }
+body.is-mobile-app .tp-foot { height:auto; min-height:64px; padding:8px 16px; gap:12px; }
+body.is-mobile-app .tp-done, body.is-mobile-app .batch-main { min-height:48px; height:auto; }
+body.is-mobile-app .tp-card-name { max-width:100%; flex-basis:100%; font-size:14px; }
+body.is-mobile-app .tp-card-desc-custom { display:none; }
+body.is-mobile-app .tp-card-batch { display:none; }
+body.is-mobile-app .mobile-library-page .cell-actions { display:flex; gap:8px; padding:0 8px 8px; }
+body.is-mobile-app .mobile-library-page .cell .enter { position:static; flex:1; opacity:1; min-height:48px; font-size:14px; border-radius:10px; }
+body.is-mobile-app .mobile-library-page .cell .cell-more { display:inline-flex; position:static; width:48px; height:48px; flex:none; }
+body.is-mobile-app .mobile-library-page .photo-check { min-height:48px; display:flex; align-items:center; }
+body.is-mobile-app .mobile-library-page .lib-toolbar .btn { min-height:48px; }
+body.is-mobile-app .mobile-editor-page .workspace { min-height:0; background:#0b1220; }
+body.is-mobile-app .mobile-editor-page .workspace .stage { min-height:0; padding:10px; background:#0b1220; }
+@media (orientation:landscape) and (max-height:600px) {
+  body.is-mobile-app .tp-body { flex-direction:row; }
+  body.is-mobile-app .tp-grid-col { flex-basis:55%; }
+  body.is-mobile-app .tp-preview-col { flex-basis:45%; }
+}
+body.is-mobile-app .pref-box {
+  width: calc(100vw - 24px);
+  max-height: 90dvh;
+  border-radius: 18px;
+}
+
+@media (min-width: 721px) and (max-height: 700px) {
+  /* 不影响桌面默认，仅给窄高窗口保留底部弹层的安全空间。 */
+  .mobile-sheet { max-height: 90vh; }
+}
+
+/* 隐藏所有滚动条（保留滚动能力）：面板/列表内容超长时不出
+   现滑动条，滚动仍可用滚轮/触摸操作。 */
+* {
+  scrollbar-width: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+}
+/* Shared workflow dialogs */
+.workflow-dialog { position: fixed; inset: 0; margin: auto; width: min(620px, calc(100vw - 48px)); max-height: 85vh; overflow: auto; padding: 24px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel, #292b2f); color: var(--text, #eee); }
+.workflow-dialog::backdrop { background: #0009; }
+.workflow-dialog h2 { font-size: 18px; margin-bottom: 12px; }
+.workflow-dialog p { font-size: 13px; line-height: 1.6; margin: 10px 0; }
+.workflow-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px; }
+.workflow-actions button { padding: 9px 16px; color: var(--text); background: var(--hover); border: 1px solid var(--border); border-radius: 5px; cursor: pointer; }
+.workflow-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.workflow-dialog :focus-visible { outline: 2px solid var(--accent, #80bfff); outline-offset: 2px; }
