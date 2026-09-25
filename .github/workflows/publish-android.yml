@@ -1,0 +1,40 @@
+name: Publish Android APK
+
+on:
+  push:
+    tags:
+      - 'android-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source and release notes
+        uses: actions/checkout@v4
+      - name: Check out APK assets
+        uses: actions/checkout@v4
+        with:
+          ref: release-assets-${{ github.ref_name }}
+          path: release-assets
+      - name: Verify and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          asset="release-assets/水印小屋-${version}-arm64-release.apk"
+          checksum="release-assets/SHA256.txt"
+          notes="docs/android/DELIVERY-${version}.md"
+          (cd release-assets && sha256sum --check SHA256.txt)
+          if [[ ! -f "$notes" ]]; then
+            echo "Missing release notes: $notes" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "$asset" "$checksum" \
+            --verify-tag --title "水印小屋 Android ${version}" \
+            --notes-file "$notes" --latest
