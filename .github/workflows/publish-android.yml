@@ -27,14 +27,19 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#android-v}"
-          asset="release-assets/水印小屋-${version}-arm64-release.apk"
-          checksum="release-assets/SHA256.txt"
+          source="release-assets/水印小屋-${version}-arm64-release.apk"
+          if [[ ! -f "$source" ]]; then
+            source="release-assets/watermark-house-${version}-arm64-release.apk"
+          fi
+          asset="watermark-house-${version}-arm64-release.apk"
           notes="docs/android/DELIVERY-${version}.md"
           (cd release-assets && sha256sum --check SHA256.txt)
+          cp "$source" "$asset"
+          sha256sum "$asset" > SHA256.txt
           if [[ ! -f "$notes" ]]; then
             echo "Missing release notes: $notes" >&2
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" "$asset" "$checksum" \
+          gh release create "$GITHUB_REF_NAME" "$asset" SHA256.txt \
             --verify-tag --title "水印小屋 Android ${version}" \
             --notes-file "$notes" --latest
